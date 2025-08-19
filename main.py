@@ -79,6 +79,40 @@ def get_bitrix_project_info(project_id: int) -> str:
         logger.error(f"Ошибка получения проекта из Bitrix: {e}")
         return f"Ошибка {project_id}"
 
+def get_bitrix_subprojects(project_id: int):
+    """Возвращает список подпроектов (верхнеуровневых задач) внутри проекта"""
+    try:
+        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
+        response = requests.get(url, params={
+            "filter[GROUP_ID]": project_id,
+            "filter[PARENT_ID]": 0,   # верхнеуровневые
+            "select[]": ["ID", "TITLE"]
+        })
+        data = response.json()
+        if "result" in data:
+            return [{"id": t["id"], "title": t["title"]} for t in data["result"]["tasks"]]
+        return []
+    except Exception as e:
+        logger.error(f"Ошибка получения подпроектов из Bitrix: {e}")
+        return []
+
+
+def get_bitrix_tasks(subproject_id: int):
+    """Возвращает список подзадач внутри подпроекта"""
+    try:
+        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
+        response = requests.get(url, params={
+            "filter[PARENT_ID]": subproject_id,
+            "select[]": ["ID", "TITLE"]
+        })
+        data = response.json()
+        if "result" in data:
+            return [{"id": t["id"], "title": t["title"]} for t in data["result"]["tasks"]]
+        return []
+    except Exception as e:
+        logger.error(f"Ошибка получения задач из Bitrix: {e}")
+        return []
+
 
 @app.get("/ping")
 async def ping():
@@ -131,6 +165,19 @@ async def serve_form_data():
         logger.exception("Ошибка в /form-data")
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
 
+
+@app.get("/subprojects")
+async def subprojects(project_id: int):
+    """Вернёт список подпроектов внутри выбранного проекта"""
+    subprojects = get_bitrix_subprojects(project_id)
+    return JSONResponse({"subprojects": subprojects})
+
+
+@app.get("/tasks")
+async def tasks(subproject_id: int):
+    """Вернёт список задач внутри выбранного подпроекта"""
+    tasks = get_bitrix_tasks(subproject_id)
+    return JSONResponse({"tasks": tasks})
 
 
 # --- Telegram bot ---
