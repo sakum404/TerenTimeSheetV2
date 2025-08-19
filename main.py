@@ -25,7 +25,8 @@ try:
     FORM_URL = os.environ["FORM_URL"]
     GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
     BITRIX_WEBHOOK = os.environ.get("BITRIX_WEBHOOK")
-    BITRIX_PROJECT_ID = [247,248]
+    BITRIX_PROJECT_ID = os.environ.get("BITRIX_PROJECT_ID", "")
+    BITRIX_PROJECT_ID = [int(x.strip()) for x in BITRIX_PROJECT_ID.split(",") if x.strip()]
 except KeyError as e:
     raise RuntimeError(f"Не задана переменная окружения: {e}")
 
