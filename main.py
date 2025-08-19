@@ -168,16 +168,14 @@ async def serve_form_data():
 
 @app.get("/subprojects")
 async def subprojects(project_id: int):
-    """Вернёт список подпроектов внутри выбранного проекта"""
-    subprojects = get_bitrix_subprojects(project_id)
-    return JSONResponse({"subprojects": subprojects})
+    subs = get_bitrix_subprojects(project_id)
+    return JSONResponse({"subprojects": [f"[{s['id']}] - {s['title']}" for s in subs]})
 
 
 @app.get("/tasks")
 async def tasks(subproject_id: int):
-    """Вернёт список задач внутри выбранного подпроекта"""
-    tasks = get_bitrix_tasks(subproject_id)
-    return JSONResponse({"tasks": tasks})
+    tasks_list = get_bitrix_tasks(subproject_id)
+    return JSONResponse({"tasks": [f"[{t['id']}] - {t['title']}" for t in tasks_list]})
 
 
 # --- Telegram bot ---
