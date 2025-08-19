@@ -14,10 +14,10 @@ from threading import Thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
-from dotenv import load_dotenv
+
 import requests
 
-load_dotenv()
+
 # --- Настройки из переменных окружения ---
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
