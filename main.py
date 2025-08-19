@@ -25,7 +25,7 @@ try:
     FORM_URL = os.environ["FORM_URL"]
     GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
     BITRIX_WEBHOOK = os.environ.get("BITRIX_WEBHOOK")
-    BITRIX_PROJECT_ID = 247
+    BITRIX_PROJECT_ID = [247,248]
 except KeyError as e:
     raise RuntimeError(f"Не задана переменная окружения: {e}")
 
@@ -88,8 +88,15 @@ async def serve_form():
 @app.get("/form-data")
 async def serve_form_data():
     try:
-        # Берём проект из Битрикс
-        project_name = get_bitrix_project_name(BITRIX_PROJECT_ID)
+        # Берём список проектов из Bitrix
+        project_names = []
+        for pid in BITRIX_PROJECT_ID:
+            try:
+                pname = get_bitrix_project_name(pid)
+                if pname:
+                    project_names.append(pname)
+            except Exception as e:
+                logger.warning(f"Не удалось получить проект {pid}: {e}")
 
         # Если всё же нужны другие данные из Google Sheets (executor, task и т.д.)
         try:
@@ -99,7 +106,7 @@ async def serve_form_data():
             data = []
 
         fields_data = {
-            "projects": [project_name],  # <-- теперь только из Bitrix
+            "projects": project_names,  # <-- теперь список из Bitrix
             "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
             "executor": sorted(set(row["executor"] for row in data if row.get("executor"))),
             "task": sorted(set(row["task"] for row in data if row.get("task"))),
