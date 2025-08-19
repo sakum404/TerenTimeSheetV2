@@ -68,7 +68,7 @@ def get_bitrix_project_info(project_id: int) -> str:
     """Возвращает строку вида [ID] - NAME для проекта"""
     try:
         url = f"{BITRIX_WEBHOOK}sonet_group.get.json"
-        response = requests.get(url, params={"ID": project_id})
+        response = requests.get(url, params={"FILTER[ID]": project_id})
         data = response.json()
         if "result" in data and data["result"]:
             project = data["result"][0]
@@ -78,6 +78,7 @@ def get_bitrix_project_info(project_id: int) -> str:
     except Exception as e:
         logger.error(f"Ошибка получения проекта из Bitrix: {e}")
         return f"Ошибка {project_id}"
+
 
 @app.get("/ping")
 async def ping():
