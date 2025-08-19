@@ -64,13 +64,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_bitrix_project_name(project_id: int) -> str:
+def get_bitrix_project_info(project_id: int) -> str:
+    """Возвращает строку вида [ID] - NAME для проекта"""
     try:
         url = f"{BITRIX_WEBHOOK}sonet_group.get.json"
         response = requests.get(url, params={"ID": project_id})
         data = response.json()
         if "result" in data and data["result"]:
-            return data["result"][0].get("NAME", f"Проект {project_id}")
+            project = data["result"][0]
+            return f"[{project['ID']}] - {project['NAME']}"
         else:
             return f"Не найден проект {project_id}"
     except Exception as e:
@@ -92,9 +94,9 @@ async def serve_form_data():
         project_names = []
         for pid in BITRIX_PROJECT_ID:
             try:
-                pname = get_bitrix_project_name(pid)
-                if pname:
-                    project_names.append(pname)
+                pinfo = get_bitrix_project_info(pid)
+                if pinfo:
+                    project_names.append(pinfo)
             except Exception as e:
                 logger.warning(f"Не удалось получить проект {pid}: {e}")
 
