@@ -212,6 +212,8 @@ def receive_webapp(update: Update, context: CallbackContext):
             log_sheet.append_row([
                 user,
                 data.get("projects", ""),
+                data.get("subproject", ""),
+                data.get("subtask", ""),
                 data.get("period", ""),
                 data.get("executor", ""),
                 data.get("position", ""),
