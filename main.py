@@ -152,7 +152,7 @@ async def serve_form_data():
             "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
         }
 
-        # Карта должностей
+         # Карта должностей
         position_map = {}
         for row in data:
             name = row.get("executor", "")
@@ -160,7 +160,15 @@ async def serve_form_data():
             if name and pos:
                 position_map[name] = pos
 
-        return JSONResponse({**fields_data, "position_map": position_map})
+        # Карта команд -> исполнители
+        team_map = {}
+        for row in data:
+            team = row.get("team", "")
+            executor = row.get("executor", "")
+            if team and executor:
+                team_map.setdefault(team, []).append(executor)
+
+        return JSONResponse({**fields_data, "position_map": position_map, "team_map": team_map})
 
     except Exception as e:
         logger.exception("Ошибка в /form-data")
