@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 import requests
 
-
+#test 2
 # --- Настройки из переменных окружения ---
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
