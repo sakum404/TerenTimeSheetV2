@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 import requests
 
-#NOTORIGIN
+#NOTORIGIN2
 # --- Настройки из переменных окружения ---
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -349,6 +349,7 @@ async def ping():
 async def serve_form():
     return FileResponse("static/form.html")
 
+
 @app.get("/form-data")
 async def serve_form_data(username: str = Query(None)):
     try:
@@ -384,32 +385,45 @@ async def serve_form_data(username: str = Query(None)):
                 except Exception as e:
                     logger.warning(f"Не удалось получить проект {pid}: {e}")
 
+        # Карта должностей
+        position_map = {}
+        # Карта команд -> исполнители
+        team_map = {}
+        # Карта username -> executor
+        username_to_executor = {}
+        # Карта username -> team
+        username_to_team = {}
+
+        for row in users:
+            # Заполняем position_map
+            name = row.get("executor", "")
+            pos = row.get("position", "")
+            if name and pos:
+                position_map[name] = pos
+
+            # Заполняем team_map
+            team = row.get("team", "")
+            executor = row.get("executor", "")
+            if team and executor:
+                team_map.setdefault(team, []).append(executor)
+
+            # Заполняем маппинг username -> executor и username -> team
+            telegram_username = row.get("telegram_username", "").lstrip("@").strip().lower()
+            if telegram_username and executor:
+                username_to_executor[telegram_username] = executor
+            if telegram_username and team:
+                username_to_team[telegram_username] = team
+
         fields_data = {
             "projects": user_projects,
             "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
             "task": sorted(set(row["task"] for row in data if row.get("task"))),
             "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
             "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
-
-            # теперь executors из user_data
             "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
+            "username_to_executor": username_to_executor,
+            "username_to_team": username_to_team
         }
-
-        # Карта должностей
-        position_map = {}
-        for row in users:
-            name = row.get("executor", "")
-            pos = row.get("position", "")
-            if name and pos:
-                position_map[name] = pos
-
-        # Карта команд -> исполнители
-        team_map = {}
-        for row in users:
-            team = row.get("team", "")
-            executor = row.get("executor", "")
-            if team and executor:
-                team_map.setdefault(team, []).append(executor)
 
         return JSONResponse({**fields_data, "position_map": position_map, "team_map": team_map})
 
