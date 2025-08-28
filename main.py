@@ -358,8 +358,12 @@ def check_password(update: Update, context: CallbackContext) -> int:
     update.message.reply_text("❌ Неверный пароль. Попробуйте снова.")
     return ASK_PASSWORD
 
+
 def send_webapp_button(update: Update) -> int:
-    button = [[KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=FORM_URL))]]
+    user_id = update.message.from_user.id
+    webapp_url = f"{FORM_URL}?user_id={user_id}"
+
+    button = [[KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=webapp_url))]]
     markup = ReplyKeyboardMarkup(button, resize_keyboard=True)
     update.message.reply_text("Нажмите, чтобы заполнить форму:", reply_markup=markup)
     return ConversationHandler.END
