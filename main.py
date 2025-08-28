@@ -227,46 +227,70 @@ async def serve_form():
 @app.get("/form-data")
 async def serve_form_data(username: str = Query(None)):
     try:
-        # --- данные по проектам (period, task, time_frame, difficulty_level) ---
+        # --- данные из projects_sheet (period и т.д.) ---
         try:
             data = project_sheet.get_all_records()
         except Exception as e:
             logger.warning(f"Google Sheets projects_sheet недоступен: {e}")
             data = []
 
-        # --- данные по пользователям ---
+        # --- данные о пользователях ---
         try:
             users = user_sheet.get_all_records()
         except Exception as e:
             logger.warning(f"Google Sheets user_data недоступен: {e}")
             users = []
 
-        # --- проекты под пользователя ---
-        user_projects = []
-        if username:
-            bitrix_id = get_user_bitrix_id(username)
-            if bitrix_id:
-                user_projects = get_user_projects(bitrix_id)
-            else:
-                logger.info(f"Не найден bitrix_id для пользователя {username}")
-        # fallback (если нет username/bitrix_id) — показывать все, как раньше
-        if not user_projects:
+        # --- если юзер есть в таблице ---
+        bitrix_id = get_user_bitrix_id(username) if username else None
+
+        projects_payload = []
+        if bitrix_id:
             for pid in BITRIX_PROJECT_ID:
-                try:
-                    pinfo = get_bitrix_project_info(pid)
-                    if pinfo:
-                        user_projects.append(pinfo)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить проект {pid}: {e}")
+                # проверяем, есть ли у юзера хоть одна задача в проекте
+                user_projects = get_user_projects(bitrix_id)
+                project_names = [get_bitrix_project_info(pid) for pid in BITRIX_PROJECT_ID if get_bitrix_project_info(pid) in user_projects]
+
+                for pname in project_names:
+                    project_id = int(pname.split("]")[0][1:])  # достаём ID из "[123] - name"
+                    # подпроекты для юзера
+                    subs = get_user_subprojects(project_id, bitrix_id)
+                    subs_payload = []
+                    for s in subs:
+                        sub_id = int(s.split("]")[0][1:])
+                        tasks = get_user_tasks(sub_id, bitrix_id)
+                        subs_payload.append({
+                            "subproject": s,
+                            "tasks": tasks
+                        })
+                    projects_payload.append({
+                        "project": pname,
+                        "subprojects": subs_payload
+                    })
+
+        # fallback — если bitrix_id не найден или пусто → возвращаем все проекты
+        if not projects_payload:
+            for pid in BITRIX_PROJECT_ID:
+                pname = get_bitrix_project_info(pid)
+                subs_full = get_bitrix_subprojects(pid)
+                subs_payload = []
+                for s in subs_full:
+                    tlist = get_bitrix_tasks(s["id"])
+                    subs_payload.append({
+                        "subproject": f"[{s['id']}] - {s['title']}",
+                        "tasks": [f"[{t['id']}] - {t['title']}" for t in tlist]
+                    })
+                projects_payload.append({
+                    "project": pname,
+                    "subprojects": subs_payload
+                })
 
         fields_data = {
-            "projects": user_projects,
+            "projects_tree": projects_payload,  # <-- новая структура
             "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
             "task": sorted(set(row["task"] for row in data if row.get("task"))),
             "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
             "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
-
-            # теперь executors из user_data
             "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
         }
 
@@ -278,7 +302,7 @@ async def serve_form_data(username: str = Query(None)):
             if name and pos:
                 position_map[name] = pos
 
-        # Карта команд -> исполнители
+        # Карта команд
         team_map = {}
         for row in users:
             team = row.get("team", "")
@@ -291,6 +315,7 @@ async def serve_form_data(username: str = Query(None)):
     except Exception as e:
         logger.exception("Ошибка в /form-data")
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
+
 
 
 
@@ -360,7 +385,6 @@ def check_password(update: Update, context: CallbackContext) -> int:
 
 
 def send_webapp_button(update: Update) -> int:
-    user_id = update.message.from_user.id
     username = update.message.from_user.username or ""
     webapp_url = f"{FORM_URL}?username={username}"
 
