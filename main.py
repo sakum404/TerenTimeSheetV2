@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 import requests
 
-#test 2
+#test 3
 # --- Настройки из переменных окружения ---
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -64,6 +64,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def is_user_allowed(username: str) -> bool:
+    """Проверяет, есть ли username в Google Sheets"""
+    try:
+        data = project_sheet.get_all_records()
+        allowed_usernames = [row.get("telegram_username", "").strip().lstrip("@") for row in data if row.get("telegram_username")]
+        return username.lstrip("@") in allowed_usernames
+    except Exception as e:
+        logger.error(f"Ошибка проверки доступа: {e}")
+        return False
 
 def get_bitrix_project_info(project_id: int) -> str:
     """Возвращает строку вида [ID] - NAME для проекта"""
@@ -191,12 +201,23 @@ async def tasks(subproject_id: int):
 ASK_PASSWORD = 1
 authorized_users = set()
 
+
 def start(update: Update, context: CallbackContext) -> int:
     user_id = update.message.from_user.id
+    username = update.message.from_user.username or ""
+
+    # Проверяем доступ через Google Sheets
+    if not is_user_allowed(username):
+        update.message.reply_text("❌ У вас нет доступа к этому боту.")
+        return ConversationHandler.END
+
+    # Если уже авторизован — сразу открываем веб
     if user_id in authorized_users:
         return send_webapp_button(update)
+
     update.message.reply_text("🔒 Введите пароль:")
     return ASK_PASSWORD
+
 
 def check_password(update: Update, context: CallbackContext) -> int:
     if update.message.text.strip() == ALLOWED_PASSWORD:
