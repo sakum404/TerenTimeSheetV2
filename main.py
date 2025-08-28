@@ -361,7 +361,7 @@ def check_password(update: Update, context: CallbackContext) -> int:
 
 def send_webapp_button(update: Update) -> int:
     user_id = update.message.from_user.id
-    webapp_url = f"{FORM_URL}?user_id={user_id}"
+    webapp_url = f"{FORM_URL}?username={user_id}"
 
     button = [[KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=webapp_url))]]
     markup = ReplyKeyboardMarkup(button, resize_keyboard=True)
