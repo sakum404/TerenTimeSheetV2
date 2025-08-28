@@ -14,7 +14,7 @@ from threading import Thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
-import urllib.parse
+
 import requests
 
 #test 3
@@ -358,16 +358,8 @@ def check_password(update: Update, context: CallbackContext) -> int:
     update.message.reply_text("❌ Неверный пароль. Попробуйте снова.")
     return ASK_PASSWORD
 
-def send_webapp_button(update: Update, context: CallbackContext) -> int:
-    user = update.message.from_user
-    username = (user.username or "").lstrip("@")
-    user_id = user.id
-
-    # кодируем параметры в URL — это гарантирует, что WebApp получит данные пользователя
-    params = urllib.parse.urlencode({"username": username, "tg_id": str(user_id)})
-    url = f"{FORM_URL.rstrip('/')}?{params}"
-
-    button = [[KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=url))]]
+def send_webapp_button(update: Update) -> int:
+    button = [[KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=FORM_URL))]]
     markup = ReplyKeyboardMarkup(button, resize_keyboard=True)
     update.message.reply_text("Нажмите, чтобы заполнить форму:", reply_markup=markup)
     return ConversationHandler.END
