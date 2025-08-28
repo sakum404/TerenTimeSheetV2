@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 import requests
 
-#test 3
+#ORIGIN
 # --- Настройки из переменных окружения ---
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -146,7 +146,7 @@ def get_user_projects(bitrix_id: int):
             tasks = data["result"]["tasks"]
             for t in tasks:
                 responsible = int(t.get("responsibleId", 0))
-                accomplices = [int(x) for x in t.get("accomplices", [])]
+                accomplices = [int(x) for x in t.get("accomplices", []) if x]
                 if bitrix_id in [responsible] + accomplices:
                     project_name = get_bitrix_project_info(pid)
                     if project_name not in projects:
@@ -168,9 +168,12 @@ def get_user_subprojects(project_id: int, bitrix_id: int):
             "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
         })
         data = response.json()
+        if "result" not in data:
+            return subs
+
         for t in data["result"]["tasks"]:
             responsible = int(t.get("responsibleId", 0))
-            accomplices = [int(x) for x in t.get("accomplices", [])]
+            accomplices = [int(x) for x in t.get("accomplices", []) if x]
             if bitrix_id in [responsible] + accomplices:
                 subs.append(f"[{t['id']}] - {t['title']}")
     except Exception as e:
@@ -188,9 +191,12 @@ def get_user_tasks(subproject_id: int, bitrix_id: int):
             "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
         })
         data = response.json()
+        if "result" not in data:
+            return tasks
+
         for t in data["result"]["tasks"]:
             responsible = int(t.get("responsibleId", 0))
-            accomplices = [int(x) for x in t.get("accomplices", [])]
+            accomplices = [int(x) for x in t.get("accomplices", []) if x]
             if bitrix_id in [responsible] + accomplices:
                 tasks.append(f"[{t['id']}] - {t['title']}")
     except Exception as e:
