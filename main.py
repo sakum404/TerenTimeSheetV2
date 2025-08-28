@@ -38,6 +38,7 @@ SCOPE = [
 SPREADSHEET_NAME = "TerenTimeSheetV2"
 PROJECTS_SHEET = "projects_sheet"
 LOG_SHEET = "WebAppData"
+USER_SHEET = "user_data"
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +51,7 @@ try:
     client = gspread.authorize(creds)
     project_sheet = client.open(SPREADSHEET_NAME).worksheet(PROJECTS_SHEET)
     log_sheet = client.open(SPREADSHEET_NAME).worksheet(LOG_SHEET)
+    user_sheet = client.open(SPREADSHEET_NAME).worksheet(USER_SHEET)  # <-- добавил
 except Exception as e:
     logger.error(f"Ошибка подключения к Google Sheets: {e}")
     raise
@@ -66,10 +68,13 @@ app.add_middleware(
 )
 
 def is_user_allowed(username: str) -> bool:
-    """Проверяет, есть ли username в Google Sheets"""
+    """Проверяет, есть ли username в Google Sheets (лист user_data)"""
     try:
-        data = project_sheet.get_all_records()
-        allowed_usernames = [row.get("telegram_username", "").strip().lstrip("@") for row in data if row.get("telegram_username")]
+        data = user_sheet.get_all_records()   # <-- теперь из user_data
+        allowed_usernames = [
+            row.get("telegram_username", "").strip().lstrip("@")
+            for row in data if row.get("telegram_username")
+        ]
         return username.lstrip("@") in allowed_usernames
     except Exception as e:
         logger.error(f"Ошибка проверки доступа: {e}")
@@ -136,7 +141,7 @@ async def serve_form():
 @app.get("/form-data")
 async def serve_form_data():
     try:
-        # Берём список проектов из Bitrix
+        # --- проекты из Bitrix ---
         project_names = []
         for pid in BITRIX_PROJECT_ID:
             try:
@@ -146,25 +151,34 @@ async def serve_form_data():
             except Exception as e:
                 logger.warning(f"Не удалось получить проект {pid}: {e}")
 
-        # Если всё же нужны другие данные из Google Sheets (executor, task и т.д.)
+        # --- данные по проектам (period, task, time_frame, difficulty_level) ---
         try:
             data = project_sheet.get_all_records()
         except Exception as e:
-            logger.warning(f"Google Sheets недоступен: {e}")
+            logger.warning(f"Google Sheets projects_sheet недоступен: {e}")
             data = []
 
+        # --- данные по пользователям ---
+        try:
+            users = user_sheet.get_all_records()
+        except Exception as e:
+            logger.warning(f"Google Sheets user_data недоступен: {e}")
+            users = []
+
         fields_data = {
-            "projects": project_names,  # <-- теперь список из Bitrix
+            "projects": project_names,
             "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
-            "executor": sorted(set(row["executor"] for row in data if row.get("executor"))),
             "task": sorted(set(row["task"] for row in data if row.get("task"))),
             "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
             "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
+
+            # теперь executors из user_data
+            "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
         }
 
-         # Карта должностей
+        # Карта должностей
         position_map = {}
-        for row in data:
+        for row in users:
             name = row.get("executor", "")
             pos = row.get("position", "")
             if name and pos:
@@ -172,7 +186,7 @@ async def serve_form_data():
 
         # Карта команд -> исполнители
         team_map = {}
-        for row in data:
+        for row in users:
             team = row.get("team", "")
             executor = row.get("executor", "")
             if team and executor:
@@ -183,6 +197,7 @@ async def serve_form_data():
     except Exception as e:
         logger.exception("Ошибка в /form-data")
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
+
 
 
 @app.get("/subprojects")
