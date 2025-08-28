@@ -227,79 +227,62 @@ async def serve_form():
 @app.get("/form-data")
 async def serve_form_data(username: str = Query(None)):
     try:
-        # --- данные из projects_sheet (period и т.д.) ---
+        # --- данные по проектам (period, task, time_frame, difficulty_level) ---
         try:
             data = project_sheet.get_all_records()
         except Exception as e:
             logger.warning(f"Google Sheets projects_sheet недоступен: {e}")
             data = []
 
-        # --- данные о пользователях ---
+        # --- данные по пользователям ---
         try:
             users = user_sheet.get_all_records()
         except Exception as e:
             logger.warning(f"Google Sheets user_data недоступен: {e}")
             users = []
 
-        # --- если юзер есть в таблице ---
-        bitrix_id = get_user_bitrix_id(username) if username else None
-
-        projects_payload = []
-        seen_projects = set()  # чтобы убрать дубли
-
-        if bitrix_id:
-            user_projects = get_user_projects(bitrix_id)  # проекты пользователя
-        else:
-            user_projects = []
-
-        for pid in BITRIX_PROJECT_ID:
-            pname = get_bitrix_project_info(pid)
-            if pname in seen_projects:
-                continue
-            seen_projects.add(pname)
-
-            subs_payload = []
+        # --- проекты под пользователя ---
+        user_projects = []
+        if username:
+            bitrix_id = get_user_bitrix_id(username)
             if bitrix_id:
-                # подпроекты для юзера
-                subs = get_user_subprojects(pid, bitrix_id)
-                for s in subs:
-                    sub_id = int(s.split("]")[0][1:])
-                    tasks = get_user_tasks(sub_id, bitrix_id)
-                    subs_payload.append({
-                        "subproject": s,
-                        "tasks": tasks
-                    })
+                user_projects = get_user_projects(bitrix_id)
             else:
-                # все подпроекты и задачи
-                subs_full = get_bitrix_subprojects(pid)
-                for s in subs_full:
-                    tlist = get_bitrix_tasks(s["id"])
-                    subs_payload.append({
-                        "subproject": f"[{s['id']}] - {s['title']}",
-                        "tasks": [f"[{t['id']}] - {t['title']}" for t in tlist]
-                    })
+                logger.info(f"Не найден bitrix_id для пользователя {username}")
+        # fallback (если нет username/bitrix_id) — показывать все, как раньше
+        if not user_projects:
+            for pid in BITRIX_PROJECT_ID:
+                try:
+                    pinfo = get_bitrix_project_info(pid)
+                    if pinfo:
+                        user_projects.append(pinfo)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить проект {pid}: {e}")
 
-            projects_payload.append({
-                "project": pname,
-                "subprojects": subs_payload
-            })
-
-        # --- формируем остальные поля ---
         fields_data = {
-            "projects_tree": projects_payload,
+            "projects": user_projects,
             "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
             "task": sorted(set(row["task"] for row in data if row.get("task"))),
             "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
             "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
+
+            # теперь executors из user_data
             "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
         }
 
-        # --- карты ---
-        position_map = {row["executor"]: row["position"] for row in users if row.get("executor")}
+        # Карта должностей
+        position_map = {}
+        for row in users:
+            name = row.get("executor", "")
+            pos = row.get("position", "")
+            if name and pos:
+                position_map[name] = pos
+
+        # Карта команд -> исполнители
         team_map = {}
         for row in users:
-            team = row.get("team")
-            executor = row.get("executor")
+            team = row.get("team", "")
+            executor = row.get("executor", "")
             if team and executor:
                 team_map.setdefault(team, []).append(executor)
 
@@ -308,6 +291,7 @@ async def serve_form_data(username: str = Query(None)):
     except Exception as e:
         logger.exception("Ошибка в /form-data")
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
+
 
 
 @app.get("/subprojects")
