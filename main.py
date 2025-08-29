@@ -59,6 +59,125 @@ except Exception as e:
 # --- FastAPI ---
 app = FastAPI()
 
+
+# ======== Performance helpers (Bitrix) ========
+import requests
+from requests.adapters import HTTPAdapter
+_BX_SESS = requests.Session()
+_BX_SESS.mount("http://", HTTPAdapter(pool_connections=20, pool_maxsize=50))
+_BX_SESS.mount("https://", HTTPAdapter(pool_connections=20, pool_maxsize=50))
+_BX_TIMEOUT = (5, 30)
+class _TTLCache:
+    def __init__(self):
+        self._data = {}
+        self.ttl = int(os.getenv("CACHE_TTL_SEC", "120"))
+    def get(self, key):
+        item = self._data.get(key)
+        if not item:
+            return None, False
+        ts, val = item
+        import time
+        fresh = (time.time() - ts) < self.ttl
+        return val, fresh
+    def set(self, key, val):
+        import time
+        self._data[key] = (time.time(), val)
+_BX_CACHE = _TTLCache()
+def _bx_get(method: str, params: dict) -> dict:
+    url = f"{BITRIX_WEBHOOK}{method}.json"
+    r = _BX_SESS.get(url, params=params or {}, timeout=_BX_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data.get("error_description") or data.get("error"))
+    return data
+def _bx_post(method: str, payload: dict) -> dict:
+    url = f"{BITRIX_WEBHOOK}{method}.json"
+    r = _BX_SESS.post(url, json=payload or {}, timeout=_BX_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data.get("error_description") or data.get("error"))
+    return data
+def _bx_batch(cmd: dict, halt: int = 0) -> dict:
+    return _bx_post("batch", {"halt": halt, "cmd": cmd})
+def _list_user_tasks_in_project_fast(project_id: int, bitrix_id: int, top: int = 1000):
+    select = ["ID","TITLE","GROUP_ID","PARENT_ID","RESPONSIBLE_ID","ACCOMPLICES"]
+    try:
+        data = _bx_get("tasks.task.list", {
+            "filter[GROUP_ID]": project_id,
+            "filter[MEMBER_ID]": bitrix_id,
+            "select[]": select,
+            "order[ID]": "desc",
+            "nav_params[nTopCount]": top
+        })
+        tasks = data.get("result", {}).get("tasks", [])
+        if tasks:
+            return tasks
+    except Exception:
+        pass
+    try:
+        resp = _bx_get("tasks.task.list", {
+            "filter[GROUP_ID]": project_id,
+            "filter[RESPONSIBLE_ID]": bitrix_id,
+            "select[]": select,
+            "order[ID]": "desc",
+            "nav_params[nTopCount]": top
+        }).get("result", {}).get("tasks", [])
+        recent = _bx_get("tasks.task.list", {
+            "filter[GROUP_ID]": project_id,
+            "select[]": select,
+            "order[ID]": "desc",
+            "nav_params[nTopCount]": top
+        }).get("result", {}).get("tasks", [])
+        by_id = {int(t["id"]): t for t in resp}
+        for t in recent:
+            acc = t.get("accomplices") or []
+            if bitrix_id in acc:
+                by_id[int(t["id"])] = t
+        return list(by_id.values())
+    except Exception:
+        return []
+def _resolve_roots_for_tasks(task_items: list):
+    if not task_items:
+        return {}, {}
+    parent = {int(t["id"]): int(t.get("parentId") or t.get("PARENT_ID") or 0) for t in task_items}
+    known = set(parent.keys())
+    to_fetch = {pid for pid in parent.values() if pid and pid not in known}
+    while to_fetch:
+        batch = list(to_fetch)[:50]
+        cmd = {f"k{i}": f"tasks.task.get?taskId={tid}" for i, tid in enumerate(batch, 1)}
+        res = _bx_batch(cmd).get("result", {}).get("result", {})
+        for v in res.values():
+            if isinstance(v, dict) and v.get("result"):
+                tt = v["result"]
+                tid = int(tt["id"])
+                pid = int(tt.get("parentId") or 0)
+                parent[tid] = pid
+        known |= set(batch)
+        to_fetch = {pid for pid in parent.values() if pid and pid not in known}
+    root_for = {}
+    for tid in list(parent.keys()):
+        seen = set()
+        cur = tid
+        while parent.get(cur, 0):
+            if cur in seen:
+                break
+            seen.add(cur)
+            cur = parent[cur]
+        root_for[tid] = cur if cur in parent else cur
+    root_ids = sorted(set(root_for.values()))
+    titles = {}
+    for i in range(0, len(root_ids), 50):
+        part = root_ids[i:i+50]
+        cmd = {f"t{i2}": f"tasks.task.get?taskId={tid}" for i2, tid in enumerate(part, 1)}
+        res = _bx_batch(cmd).get("result", {}).get("result", {})
+        for v in res.values():
+            if isinstance(v, dict) and v.get("result"):
+                tt = v["result"]
+                titles[int(tt["id"])] = tt.get("title") or f"Task {tt['id']}"
+    return root_for, titles
+# ======== /Performance helpers ========
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Или укажи только https://terentimesheet.utc-service.kz
@@ -131,23 +250,50 @@ def get_bitrix_tasks(subproject_id: int):
 
 
 def get_user_projects(bitrix_id: int):
-    """Возвращает проекты, где пользователь участвует (включая подзадачи)"""
+    """Быстро возвращает проекты (из BITRIX_PROJECT_ID), где пользователь участвует (как ответственный/соисполнитель)."""
     projects = []
     try:
-        for pid in BITRIX_PROJECT_ID:
-            logger.info(f"Checking project {pid} for user {bitrix_id}")
-
-            # Проверяем все задачи в проекте рекурсивно
-            if is_user_in_project_tasks(pid, bitrix_id):
-                project_name = get_bitrix_project_info(pid)
-                if project_name and project_name not in projects:
-                    projects.append(project_name)
-                    logger.info(f"User found in project {pid}: {project_name}")
-
+        ids = list(BITRIX_PROJECT_ID)
+        hits = []
+        for i in range(0, len(ids), 50):
+            part = ids[i:i+50]
+            cmd = {}
+            for idx, gid in enumerate(part, 1):
+                cmd[f"c{idx}"] = f"tasks.task.list?filter[GROUP_ID]={gid}&filter[MEMBER_ID]={bitrix_id}&select[]=ID&nav_params[nTopCount]=1"
+            data = _bx_batch(cmd)
+            result = data.get("result", {}).get("result", {})
+            for key, val in result.items():
+                tasks_list = val.get("result", {}).get("tasks", []) if isinstance(val, dict) else []
+                if tasks_list:
+                    hits.append(part[int(key[1:]) - 1])
+        if hits:
+            for i in range(0, len(hits), 45):
+                part = hits[i:i+45]
+                cmd = {f"g{idx}": f"sonet_group.get?id={gid}" for idx, gid in enumerate(part, 1)}
+                data = _bx_batch(cmd)
+                res = data.get("result", {}).get("result", {})
+                for v in res.values():
+                    if isinstance(v, dict) and v.get("ID"):
+                        gid = int(v["ID"])
+                        name = v.get("NAME") or v.get("PROJECT_NAME") or f"Group {gid}"
+                        projects.append(f"[{gid}] - {name}")
+        if not projects:
+            for pid in BITRIX_PROJECT_ID:
+                if is_user_in_project_tasks(pid, bitrix_id):
+                    name = get_bitrix_project_info(pid)
+                    if name:
+                        projects.append(name)
     except Exception as e:
-        logger.error(f"Ошибка поиска проектов для {bitrix_id}: {e}")
+        logger.error(f"Ошибка быстрого поиска проектов: {e}")
+        if not projects:
+            for pid in BITRIX_PROJECT_ID:
+                try:
+                    pinfo = get_bitrix_project_info(pid)
+                    if pinfo:
+                        projects.append(pinfo)
+                except Exception:
+                    pass
     return projects
-
 
 def is_user_in_project_tasks(project_id: int, bitrix_id: int, parent_id: int = 0) -> bool:
     """Рекурсивно проверяет, есть ли пользователь в задачах проекта"""
@@ -193,32 +339,21 @@ def is_user_in_project_tasks(project_id: int, bitrix_id: int, parent_id: int = 0
 
 
 def get_user_subprojects(project_id: int, bitrix_id: int):
-    """Возвращает подпроекты (верхнеуровневые задачи), где участвует пользователь или его подзадачи"""
-    subs = []
+    """Возвращает подпроекты (верхнеуровневые задачи), где пользователь участвует в дереве задач проекта)."""
+    cache_key = f"usr_subs:{project_id}:{bitrix_id}"
+    cached, fresh = _BX_CACHE.get(cache_key)
+    if cached:
+        return cached
     try:
-        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
-        response = requests.get(url, params={
-            "filter[GROUP_ID]": project_id,
-            "filter[PARENT_ID]": 0,
-            "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
-        })
-        data = response.json()
-
-        if "result" not in data:
-            return subs
-
-        for task in data["result"]["tasks"]:
-            task_id = task.get("id")
-            task_title = task.get("title", "")
-
-            # Проверяем, есть ли пользователь в этой задаче или ее подзадачах
-            if is_user_in_task_or_subtasks(project_id, task_id, bitrix_id):
-                subs.append(f"[{task_id}] - {task_title}")
-
+        tasks = _list_user_tasks_in_project_fast(project_id, bitrix_id, top=2000)
+        root_for, titles = _resolve_roots_for_tasks(tasks)
+        roots = sorted(set(root_for.values()))
+        subs = [f"[{rid}] - {titles.get(rid, f'Task {rid}')}" for rid in roots if rid]
     except Exception as e:
-        logger.error(f"Ошибка поиска подпроектов: {e}")
+        logger.error(f"Ошибка быстрого поиска подпроектов: {e}")
+        subs = []
+    _BX_CACHE.set(cache_key, subs)
     return subs
-
 
 def is_user_in_task_or_subtasks(project_id: int, task_id: int, bitrix_id: int) -> bool:
     """Проверяет, есть ли пользователь в задаче или ее подзадачах"""
@@ -277,16 +412,22 @@ def has_user_in_subtasks(project_id: int, parent_task_id: int, bitrix_id: int) -
 
 
 def get_user_tasks(subproject_id: int, bitrix_id: int):
-    """Возвращает задачи подпроекта, где участвует пользователь"""
-    tasks = []
+    """Возвращает задачи подпроекта, где участвует пользователь (без глубокой рекурсии)."""
     try:
-        # Получаем все подзадачи рекурсивно
-        tasks = get_all_user_subtasks(subproject_id, bitrix_id)
-
+        root_info = _bx_get("tasks.task.get", {"taskId": subproject_id}).get("result", {})
+        project_id = int(root_info.get("groupId") or 0) if root_info else 0
+        if not project_id:
+            return []
+        tasks = _list_user_tasks_in_project_fast(project_id, bitrix_id, top=3000)
+        root_for, _titles = _resolve_roots_for_tasks(tasks)
+        filtered = [t for t in tasks if root_for.get(int(t["id"])) == int(subproject_id)]
+        return [f"[{t['id']}] - {t.get('title','')}" for t in filtered]
     except Exception as e:
-        logger.error(f"Ошибка поиска задач: {e}")
-    return tasks
-
+        logger.error(f"Ошибка быстрого поиска задач подпроекта: {e}")
+        try:
+            return get_all_user_subtasks(subproject_id, bitrix_id)
+        except Exception:
+            return []
 
 def get_all_user_subtasks(parent_task_id: int, bitrix_id: int):
     """Рекурсивно получает все подзадачи где участвует пользователь"""
