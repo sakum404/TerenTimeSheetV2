@@ -17,7 +17,7 @@ from collections import OrderedDict
 from functools import lru_cache
 import requests
 import time
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 import asyncio
 
 # NOTORIGIN3
@@ -44,10 +44,11 @@ LOG_SHEET = "WebAppData"
 USER_SHEET = "user_data"
 
 # --- Глобальные кэши для ВСЕХ данных ---
-ALL_PROJECTS_DATA: Dict[int, str] = {}  # project_id -> project_name
-ALL_SUBPROJECTS_DATA: Dict[int, List[Dict]] = {}  # project_id -> list of subprojects
-ALL_TASKS_DATA: Dict[int, List[Dict]] = {}  # subproject_id -> list of tasks
-USER_ACCESS_CACHE: Dict[int, Set[int]] = {}  # user_id -> set of accessible project_ids
+ALL_PROJECTS_DATA: Dict[int, str] = {}
+ALL_SUBPROJECTS_DATA: Dict[int, List[Dict]] = {}
+ALL_TASKS_DATA: Dict[int, List[Dict]] = {}
+TASK_USER_MAP: Dict[int, Set[int]] = {}  # task_id -> set of user_ids
+SUBPROJECT_USER_MAP: Dict[int, Set[int]] = {}  # subproject_id -> set of user_ids
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
@@ -114,11 +115,16 @@ def get_bitrix_subprojects(project_id: int):
         response = requests.get(url, params={
             "filter[GROUP_ID]": project_id,
             "filter[PARENT_ID]": 0,
-            "select[]": ["ID", "TITLE"]
+            "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
         })
         data = response.json()
         if "result" in data:
-            return [{"id": t["id"], "title": t["title"]} for t in data["result"]["tasks"]]
+            return [{
+                "id": t["id"],
+                "title": t["title"],
+                "responsible_id": int(t.get("responsibleId", 0)),
+                "accomplices": [int(x) for x in t.get("accomplices", []) if x]
+            } for t in data["result"]["tasks"]]
         return []
     except Exception as e:
         logger.error(f"Ошибка получения подпроектов из Bitrix: {e}")
@@ -131,89 +137,30 @@ def get_bitrix_tasks(subproject_id: int):
         url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
         response = requests.get(url, params={
             "filter[PARENT_ID]": subproject_id,
-            "select[]": ["ID", "TITLE"]
+            "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
         })
         data = response.json()
         if "result" in data:
-            return [{"id": t["id"], "title": t["title"]} for t in data["result"]["tasks"]]
+            return [{
+                "id": t["id"],
+                "title": t["title"],
+                "responsible_id": int(t.get("responsibleId", 0)),
+                "accomplices": [int(x) for x in t.get("accomplices", []) if x]
+            } for t in data["result"]["tasks"]]
         return []
     except Exception as e:
         logger.error(f"Ошибка получения задач из Bitrix: {e}")
         return []
 
 
-def is_user_in_project_tasks(project_id: int, bitrix_id: int, parent_id: int = 0) -> bool:
-    """Рекурсивно проверяет, есть ли пользователь в задачах проекта"""
-    try:
-        # Используем предзагруженные данные вместо запросов к Bitrix
-        if project_id not in ALL_SUBPROJECTS_DATA:
-            return False
-
-        # Проверяем все подпроекты проекта
-        for subproject in ALL_SUBPROJECTS_DATA[project_id]:
-            subproject_id = subproject['id']
-
-            # Проверяем задачи в подпроекте
-            if subproject_id in ALL_TASKS_DATA:
-                for task in ALL_TASKS_DATA[subproject_id]:
-                    # Здесь должна быть логика проверки пользователя в задаче
-                    # Для простоты предположим, что у нас есть информация о пользователях
-                    # В реальности нужно адаптировать под вашу структуру данных
-                    pass
-
-        # Временная заглушка - возвращаем True для тестирования
-        return True
-
-    except Exception as e:
-        logger.error(f"Ошибка проверки задач проекта {project_id}: {e}")
-        return False
-
-
-def get_user_projects(bitrix_id: int):
-    """Возвращает проекты, где пользователь участвует"""
-    projects = []
-    try:
-        for pid in BITRIX_PROJECT_ID:
-            if is_user_in_project_tasks(pid, bitrix_id):
-                project_name = ALL_PROJECTS_DATA.get(pid, f"[{pid}] - Неизвестный проект")
-                projects.append(project_name)
-
-        return projects
-    except Exception as e:
-        logger.error(f"Ошибка поиска проектов для {bitrix_id}: {e}")
-        return []
-
-
-def get_user_subprojects(project_id: int, bitrix_id: int):
-    """Возвращает подпроекты, где участвует пользователь"""
-    subs = []
-    try:
-        if project_id in ALL_SUBPROJECTS_DATA:
-            for subproject in ALL_SUBPROJECTS_DATA[project_id]:
-                # Здесь должна быть логика проверки пользователя в подпроекте
-                # Для тестирования возвращаем все подпроекты
-                subs.append(f"[{subproject['id']}] - {subproject['title']}")
-
-        return subs
-    except Exception as e:
-        logger.error(f"Ошибка поиска подпроектов: {e}")
-        return []
-
-
-def get_user_tasks(subproject_id: int, bitrix_id: int):
-    """Возвращает задачи подпроекта, где участвует пользователь"""
-    tasks = []
-    try:
-        if subproject_id in ALL_TASKS_DATA:
-            for task in ALL_TASKS_DATA[subproject_id]:
-                # Здесь должна быть логика проверки пользователя в задаче
-                # Для тестирования возвращаем все задачи
-                tasks.append(f"[{task['id']}] - {task['title']}")
-
-        return tasks
-    except Exception as e:
-        logger.error(f"Ошибка поиска задач: {e}")
-        return []
+def get_task_users(task_data: Dict) -> Set[int]:
+    """Возвращает set пользователей задачи (ответственный + соисполнители)"""
+    users = set()
+    if task_data.get("responsible_id"):
+        users.add(task_data["responsible_id"])
+    if task_data.get("accomplices"):
+        users.update(task_data["accomplices"])
+    return users
 
 
 def get_user_bitrix_id(username: str) -> int | None:
@@ -256,12 +203,23 @@ def preload_all_bitrix_data():
                 total_subprojects += len(subprojects)
                 logger.info(f"   📂 Подпроектов: {len(subprojects)}")
 
+                # Сохраняем пользователей для каждого подпроекта
+                for subproject in subprojects:
+                    sub_id = subproject['id']
+                    sub_users = get_task_users(subproject)
+                    SUBPROJECT_USER_MAP[sub_id] = sub_users
+
                 # Для каждого подпроекта загружаем ВСЕ задачи
                 for subproject in subprojects:
                     sub_id = subproject['id']
                     tasks = get_bitrix_tasks(sub_id)
                     ALL_TASKS_DATA[sub_id] = tasks
                     total_tasks += len(tasks)
+
+                    # Сохраняем пользователей для каждой задачи
+                    for task in tasks:
+                        task_users = get_task_users(task)
+                        TASK_USER_MAP[task['id']] = task_users
 
                     if tasks:
                         logger.info(f"     📝 Задач в подпроекте {sub_id}: {len(tasks)}")
@@ -273,9 +231,63 @@ def preload_all_bitrix_data():
         logger.info(f"   📊 Проектов: {len(ALL_PROJECTS_DATA)}")
         logger.info(f"   📁 Подпроектов: {total_subprojects}")
         logger.info(f"   📋 Задач: {total_tasks}")
+        logger.info(f"   👥 Пользователей в подпроектах: {sum(len(users) for users in SUBPROJECT_USER_MAP.values())}")
+        logger.info(f"   👥 Пользователей в задачах: {sum(len(users) for users in TASK_USER_MAP.values())}")
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка предзагрузки: {e}")
+
+
+def get_user_projects(bitrix_id: int) -> List[str]:
+    """Возвращает проекты, где пользователь участвует"""
+    projects = []
+    try:
+        for pid in BITRIX_PROJECT_ID:
+            # Проверяем, есть ли пользователь в любом подпроекте этого проекта
+            if pid in ALL_SUBPROJECTS_DATA:
+                for subproject in ALL_SUBPROJECTS_DATA[pid]:
+                    sub_id = subproject['id']
+                    if sub_id in SUBPROJECT_USER_MAP and bitrix_id in SUBPROJECT_USER_MAP[sub_id]:
+                        project_name = ALL_PROJECTS_DATA.get(pid)
+                        if project_name and project_name not in projects:
+                            projects.append(project_name)
+                            break
+
+        return projects
+    except Exception as e:
+        logger.error(f"Ошибка поиска проектов для {bitrix_id}: {e}")
+        return []
+
+
+def get_user_subprojects(project_id: int, bitrix_id: int) -> List[str]:
+    """Возвращает подпроекты, где участвует пользователь"""
+    subs = []
+    try:
+        if project_id in ALL_SUBPROJECTS_DATA:
+            for subproject in ALL_SUBPROJECTS_DATA[project_id]:
+                sub_id = subproject['id']
+                if sub_id in SUBPROJECT_USER_MAP and bitrix_id in SUBPROJECT_USER_MAP[sub_id]:
+                    subs.append(f"[{subproject['id']}] - {subproject['title']}")
+
+        return subs
+    except Exception as e:
+        logger.error(f"Ошибка поиска подпроектов: {e}")
+        return []
+
+
+def get_user_tasks(subproject_id: int, bitrix_id: int) -> List[str]:
+    """Возвращает задачи подпроекта, где участвует пользователь"""
+    tasks = []
+    try:
+        if subproject_id in ALL_TASKS_DATA:
+            for task in ALL_TASKS_DATA[subproject_id]:
+                if task['id'] in TASK_USER_MAP and bitrix_id in TASK_USER_MAP[task['id']]:
+                    tasks.append(f"[{task['id']}] - {task['title']}")
+
+        return tasks
+    except Exception as e:
+        logger.error(f"Ошибка поиска задач: {e}")
+        return []
 
 
 @app.get("/ping")
@@ -367,14 +379,15 @@ async def subprojects(project_id: int, username: str = Query(None)):
     try:
         # Берем из предзагруженного кэша
         subs_data = ALL_SUBPROJECTS_DATA.get(project_id, [])
-        subs = [f"[{s['id']}] - {s['title']}" for s in subs_data]
 
         # Фильтрация по пользователю
         bitrix_id = get_user_bitrix_id(username) if username else None
         if bitrix_id:
-            user_subs = get_user_subprojects(project_id, bitrix_id)
-            if user_subs:
-                subs = user_subs
+            # Только подпроекты пользователя
+            subs = get_user_subprojects(project_id, bitrix_id)
+        else:
+            # Все подпроекты
+            subs = [f"[{s['id']}] - {s['title']}" for s in subs_data]
 
         return JSONResponse({"subprojects": subs})
     except Exception as e:
@@ -387,14 +400,15 @@ async def tasks(subproject_id: int, username: str = Query(None)):
     try:
         # Берем из предзагруженного кэша
         tasks_data = ALL_TASKS_DATA.get(subproject_id, [])
-        tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_data]
 
         # Фильтрация по пользователю
         bitrix_id = get_user_bitrix_id(username) if username else None
         if bitrix_id:
-            user_tasks = get_user_tasks(subproject_id, bitrix_id)
-            if user_tasks:
-                tasks_resp = user_tasks
+            # Только задачи пользователя
+            tasks_resp = get_user_tasks(subproject_id, bitrix_id)
+        else:
+            # Все задачи
+            tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_data]
 
         return JSONResponse({"tasks": tasks_resp})
     except Exception as e:
