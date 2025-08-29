@@ -14,7 +14,7 @@ from threading import Thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
-
+import re
 import requests
 
 #NOTORIGIN2
@@ -340,6 +340,95 @@ def get_user_bitrix_id(username: str) -> int | None:
         logger.error(f"Ошибка получения bitrix_id: {e}")
         return None
 
+
+@app.get("/preload-data")
+async def preload_data(username: str = Query(None)):
+    """Предзагружает все данные для пользователя сразу"""
+    try:
+        # Получаем bitrix_id пользователя
+        bitrix_id = get_user_bitrix_id(username) if username else None
+
+        # Структура для хранения всех данных
+        all_data = {
+            "projects": {},
+            "user_projects": [],
+            "has_user_filter": bool(bitrix_id)
+        }
+
+        # Если пользователь найден, получаем только его проекты
+        if bitrix_id:
+            user_project_names = get_user_projects(bitrix_id)
+            all_data["user_projects"] = user_project_names
+
+            # Извлекаем ID проектов из названий
+            project_ids = []
+            for project_name in user_project_names:
+                match = re.search(r'\[(\d+)\]', project_name)
+                if match:
+                    project_ids.append(int(match.group(1)))
+        else:
+            # Если пользователь не найден, используем все проекты
+            project_ids = BITRIX_PROJECT_ID
+            for pid in project_ids:
+                try:
+                    pinfo = get_bitrix_project_info(pid)
+                    if pinfo:
+                        all_data["user_projects"].append(pinfo)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить проект {pid}: {e}")
+
+        # Предзагружаем данные для каждого проекта
+        for project_id in project_ids:
+            try:
+                project_data = {
+                    "subprojects": {},
+                    "user_subprojects": []
+                }
+
+                # Получаем подпроекты
+                if bitrix_id:
+                    user_subs = get_user_subprojects(project_id, bitrix_id)
+                    project_data["user_subprojects"] = user_subs
+
+                    # Извлекаем ID подпроектов
+                    subproject_ids = []
+                    for sub_name in user_subs:
+                        match = re.search(r'\[(\d+)\]', sub_name)
+                        if match:
+                            subproject_ids.append(int(match.group(1)))
+                else:
+                    # Все подпроекты
+                    subs_full = get_bitrix_subprojects(project_id)
+                    subproject_ids = [s['id'] for s in subs_full]
+                    project_data["user_subprojects"] = [f"[{s['id']}] - {s['title']}" for s in subs_full]
+
+                # Для каждого подпроекта получаем задачи
+                for subproject_id in subproject_ids:
+                    try:
+                        if bitrix_id:
+                            tasks_list = get_user_tasks(subproject_id, bitrix_id)
+                        else:
+                            tasks_full = get_bitrix_tasks(subproject_id)
+                            tasks_list = [f"[{t['id']}] - {t['title']}" for t in tasks_full]
+
+                        project_data["subprojects"][str(subproject_id)] = tasks_list
+
+                    except Exception as e:
+                        logger.warning(f"Ошибка загрузки задач для подпроекта {subproject_id}: {e}")
+                        project_data["subprojects"][str(subproject_id)] = []
+
+                all_data["projects"][str(project_id)] = project_data
+
+            except Exception as e:
+                logger.warning(f"Ошибка загрузки данных проекта {project_id}: {e}")
+                all_data["projects"][str(project_id)] = {"subprojects": {}, "user_subprojects": []}
+
+        logger.info(f"Предзагрузка завершена для пользователя {username}. Проектов: {len(project_ids)}")
+        return JSONResponse(all_data)
+
+    except Exception as e:
+        logger.exception("Ошибка в /preload-data")
+        return JSONResponse(content={"error": f"Ошибка предзагрузки: {str(e)}"}, status_code=500)
 
 @app.get("/ping")
 async def ping():
