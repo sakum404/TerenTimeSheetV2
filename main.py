@@ -159,7 +159,7 @@ def is_user_in_project_tasks(project_id: int, bitrix_id: int, parent_id: int = 0
         }
 
         # Если проверяем подзадачи конкретного родителя
-        if parent_id > 0:
+        if int(parent_id) > 0:
             params["filter[PARENT_ID]"] = parent_id
         else:
             # Проверяем только задачи верхнего уровня
