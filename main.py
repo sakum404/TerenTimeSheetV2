@@ -132,25 +132,27 @@ def get_bitrix_subprojects(project_id: int):
 
 
 def get_bitrix_tasks(subproject_id: int):
-    """Возвращает список подзадач внутри подпроекта"""
-    try:
+    """Возвращает список всех подзадач подпроекта без фильтра по пользователю"""
+    tasks_all = []
+
+    def fetch_tasks(parent_id):
         url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
-        response = requests.get(url, params={
-            "filter[PARENT_ID]": subproject_id,
-            "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
-        })
-        data = response.json()
-        if "result" in data:
-            return [{
-                "id": t["id"],
-                "title": t["title"],
-                "responsible_id": int(t.get("responsibleId", 0)),
-                "accomplices": [int(x) for x in t.get("accomplices", []) if x]
-            } for t in data["result"]["tasks"]]
-        return []
-    except Exception as e:
-        logger.error(f"Ошибка получения задач из Bitrix: {e}")
-        return []
+        try:
+            response = requests.get(url, params={
+                "filter[PARENT_ID]": parent_id,
+                "select[]": ["ID", "TITLE"]
+            })
+            data = response.json()
+            tasks = data.get("result", {}).get("tasks", [])
+            for t in tasks:
+                tasks_all.append({"id": t["id"], "title": t["title"]})
+                # Рекурсивно получаем подзадачи
+                fetch_tasks(t["id"])
+        except Exception as e:
+            logger.error(f"Ошибка получения задач Bitrix: {e}")
+
+    fetch_tasks(subproject_id)
+    return tasks_all
 
 
 def get_task_users(task_data: Dict) -> Set[int]:
@@ -398,23 +400,30 @@ async def subprojects(project_id: int, username: str = Query(None)):
 @app.get("/tasks")
 async def tasks(subproject_id: int, username: str = Query(None)):
     try:
-        # Берем из предзагруженного кэша
-        tasks_data = ALL_TASKS_DATA.get(subproject_id, [])
-
-        # Фильтрация по пользователю
+        tasks_resp = []
         bitrix_id = get_user_bitrix_id(username) if username else None
+
+        all_tasks = get_bitrix_tasks(subproject_id)
+
         if bitrix_id:
-            # Только задачи пользователя
-            tasks_resp = get_user_tasks(subproject_id, bitrix_id)
+            # Фильтруем только задачи с участием пользователя
+            for t in all_tasks:
+                task_id = t["id"]
+                url = f"{BITRIX_WEBHOOK}tasks.task.get.json"
+                resp = requests.get(url, params={"taskId": task_id}).json()
+                task = resp.get("result", {})
+                responsible = int(task.get("responsibleId", 0))
+                accomplices = [int(x) for x in task.get("accomplices", []) if x]
+                if bitrix_id in [responsible] + accomplices:
+                    tasks_resp.append(f"[{t['id']}] - {t['title']}")
         else:
-            # Все задачи
-            tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_data]
+            # Без username — возвращаем все задачи
+            tasks_resp = [f"[{t['id']}] - {t['title']}" for t in all_tasks]
 
         return JSONResponse({"tasks": tasks_resp})
     except Exception as e:
         logger.exception("Ошибка в /tasks")
         return JSONResponse({"tasks": []})
-
 
 # --- Telegram bot ---
 ASK_PASSWORD = 1
