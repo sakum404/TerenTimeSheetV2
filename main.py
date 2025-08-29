@@ -300,15 +300,20 @@ def has_user_in_subtasks(project_id: int, parent_task_id: int, bitrix_id: int) -
 
 
 def get_user_tasks(project_id: int, subproject_id: int, bitrix_id: int):
+    """Задачи внутри подпроекта для пользователя"""
     tasks = get_all_project_tasks(project_id)
     subtasks = []
     for t in tasks:
-        if int(t.get("parentId", 0)) == int(subproject_id):
-            resp = int(t.get("responsibleId", 0))
-            accomplices = [int(x) for x in t.get("accomplices", []) if x]
+        parent = int(t.get("parentId", t.get("PARENT_ID", 0)) or 0)
+        if parent == int(subproject_id):
+            resp = int(t.get("responsibleId", t.get("RESPONSIBLE_ID", 0)) or 0)
+            accomplices = [int(x) for x in (t.get("accomplices") or t.get("ACCOMPLICES") or []) if x]
             if bitrix_id in [resp] + accomplices:
-                subtasks.append(f"[{t['id']}] - {t['title']}")
+                tid = t.get("id") or t.get("ID")
+                title = t.get("title") or t.get("TITLE") or ""
+                subtasks.append(f"[{tid}] - {title}")
     return subtasks
+
 
 
 def get_all_user_subtasks(parent_task_id: int, bitrix_id: int):
@@ -489,20 +494,54 @@ async def subprojects(project_id: int, username: str = Query(None)):
 
 
 @app.get("/tasks")
-async def tasks(project_id: int, subproject_id: int, username: str = Query(None)):
+async def tasks(
+    subproject_id: int,
+    project_id: int | None = Query(None),
+    username: str = Query(None)
+):
     try:
-        tasks_resp = []
         bitrix_id = get_user_bitrix_id(username) if username else None
+
+        def find_project_for_subproject(sp_id: int) -> int | None:
+            # ищем подпроект среди всех проектов; используем кэш get_all_project_tasks
+            for pid in BITRIX_PROJECT_ID:
+                tasks = get_all_project_tasks(pid)
+                if any(str(t.get("id") or t.get("ID")) == str(sp_id) for t in tasks):
+                    return pid
+            return None
+
+        effective_project_id = project_id or find_project_for_subproject(subproject_id)
+        if not effective_project_id:
+            return JSONResponse({"tasks": [], "all_tasks": []})
+
+        # все прямые дочерние задачи выбранного подпроекта
+        all_tasks_list = get_all_project_tasks(effective_project_id)
+        children = [
+            t for t in all_tasks_list
+            if int(t.get("parentId", t.get("PARENT_ID", 0)) or 0) == int(subproject_id)
+        ]
+        all_tasks = [
+            f"[{(t.get('id') or t.get('ID'))}] - {(t.get('title') or t.get('TITLE') or '')}"
+            for t in children
+        ]
+
+        # если есть username — отберём только задачи, где пользователь участвует
         if bitrix_id:
-            tasks_resp = get_user_tasks(project_id, subproject_id, bitrix_id)
+            user_tasks = []
+            for t in children:
+                resp = int(t.get("responsibleId", t.get("RESPONSIBLE_ID", 0)) or 0)
+                accomplices = [int(x) for x in (t.get("accomplices") or t.get("ACCOMPLICES") or []) if x]
+                if bitrix_id in [resp] + accomplices:
+                    tid = t.get("id") or t.get("ID")
+                    title = t.get("title") or t.get("TITLE") or ""
+                    user_tasks.append(f"[{tid}] - {title}")
         else:
-            # fallback: все задачи
-            tasks_list = get_bitrix_tasks(subproject_id)
-            tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_list]
-        return JSONResponse({"tasks": tasks_resp})
+            user_tasks = all_tasks[:]  # если юзер не указан — вернём все
+
+        return JSONResponse({"tasks": user_tasks, "all_tasks": all_tasks})
     except Exception as e:
         logger.exception("Ошибка в /tasks")
-        return JSONResponse({"tasks": []})
+        return JSONResponse({"tasks": [], "all_tasks": []})
 
 
 # --- Telegram bot ---
