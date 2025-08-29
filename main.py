@@ -16,6 +16,7 @@ from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
 import re
 import requests
+from typing import Dict, List, Any
 
 #NOTORIGIN2
 # --- Настройки из переменных окружения ---
@@ -340,95 +341,66 @@ def get_user_bitrix_id(username: str) -> int | None:
         logger.error(f"Ошибка получения bitrix_id: {e}")
         return None
 
+@app.get("/full-hierarchy")
+async def get_full_hierarchy(username: str = Query(None)):
+    """
+    Возвращает полную иерархию проектов, подпроектов и задач для всех проектов.
+    Структура: { project_id: { 'name': str, 'subprojects': List[subproject] } }
+    """
+    full_data = {}
+    bitrix_id = get_user_bitrix_id(username) if username else None
 
-@app.get("/preload-data")
-async def preload_data(username: str = Query(None)):
-    """Предзагружает все данные для пользователя сразу"""
-    try:
-        # Получаем bitrix_id пользователя
-        bitrix_id = get_user_bitrix_id(username) if username else None
+    # Проходим по всем проектам, указанным в BITRIX_PROJECT_ID
+    for project_id in BITRIX_PROJECT_ID:
+        try:
+            project_info_str = get_bitrix_project_info(project_id)
+            project_name = project_info_str.split(" - ")[-1] if " - " in project_info_str else project_info_str
 
-        # Структура для хранения всех данных
-        all_data = {
-            "projects": {},
-            "user_projects": [],
-            "has_user_filter": bool(bitrix_id)
-        }
+            # Получаем подпроекты (учитывая права пользователя)
+            if bitrix_id:
+                # Если пользователь известен, берем только те, где он участвует
+                subprojects_list = get_user_subprojects(project_id, bitrix_id)
+            else:
+                # Fallback: все подпроекты
+                subprojects_raw = get_bitrix_subprojects(project_id)
+                subprojects_list = [f"[{s['id']}] - {s['title']}" for s in subprojects_raw]
 
-        # Если пользователь найден, получаем только его проекты
-        if bitrix_id:
-            user_project_names = get_user_projects(bitrix_id)
-            all_data["user_projects"] = user_project_names
+            # Для каждого подпроекта получаем задачи
+            subprojects_data = []
+            for subproject_str in subprojects_list:
+                # Извлекаем ID из строки вида "[123] - Название"
+                match = re.search(r'\[(\d+)\]', subproject_str)
+                if not match:
+                    continue
+                subproject_id = int(match.group(1))
 
-            # Извлекаем ID проектов из названий
-            project_ids = []
-            for project_name in user_project_names:
-                match = re.search(r'\[(\d+)\]', project_name)
-                if match:
-                    project_ids.append(int(match.group(1)))
-        else:
-            # Если пользователь не найден, используем все проекты
-            project_ids = BITRIX_PROJECT_ID
-            for pid in project_ids:
-                try:
-                    pinfo = get_bitrix_project_info(pid)
-                    if pinfo:
-                        all_data["user_projects"].append(pinfo)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить проект {pid}: {e}")
-
-        # Предзагружаем данные для каждого проекта
-        for project_id in project_ids:
-            try:
-                project_data = {
-                    "subprojects": {},
-                    "user_subprojects": []
-                }
-
-                # Получаем подпроекты
+                # Получаем задачи для этого подпроекта (учитывая права пользователя)
                 if bitrix_id:
-                    user_subs = get_user_subprojects(project_id, bitrix_id)
-                    project_data["user_subprojects"] = user_subs
-
-                    # Извлекаем ID подпроектов
-                    subproject_ids = []
-                    for sub_name in user_subs:
-                        match = re.search(r'\[(\d+)\]', sub_name)
-                        if match:
-                            subproject_ids.append(int(match.group(1)))
+                    tasks_list = get_user_tasks(subproject_id, bitrix_id)
                 else:
-                    # Все подпроекты
-                    subs_full = get_bitrix_subprojects(project_id)
-                    subproject_ids = [s['id'] for s in subs_full]
-                    project_data["user_subprojects"] = [f"[{s['id']}] - {s['title']}" for s in subs_full]
+                    tasks_raw = get_bitrix_tasks(subproject_id)
+                    tasks_list = [f"[{t['id']}] - {t['title']}" for t in tasks_raw]
 
-                # Для каждого подпроекта получаем задачи
-                for subproject_id in subproject_ids:
-                    try:
-                        if bitrix_id:
-                            tasks_list = get_user_tasks(subproject_id, bitrix_id)
-                        else:
-                            tasks_full = get_bitrix_tasks(subproject_id)
-                            tasks_list = [f"[{t['id']}] - {t['title']}" for t in tasks_full]
+                # Сохраняем данные по подпроекту
+                subproject_data = {
+                    "id": subproject_id,
+                    "name": subproject_str,
+                    "tasks": tasks_list
+                }
+                subprojects_data.append(subproject_data)
 
-                        project_data["subprojects"][str(subproject_id)] = tasks_list
+            # Сохраняем данные по проекту
+            full_data[project_id] = {
+                "name": project_info_str,
+                "subprojects": subprojects_data
+            }
 
-                    except Exception as e:
-                        logger.warning(f"Ошибка загрузки задач для подпроекта {subproject_id}: {e}")
-                        project_data["subprojects"][str(subproject_id)] = []
+        except Exception as e:
+            logger.error(f"Ошибка получения иерархии для проекта {project_id}: {e}")
+            continue # Пропускаем проблемный проект и идем дальше
 
-                all_data["projects"][str(project_id)] = project_data
+    return JSONResponse({"hierarchy": full_data})
 
-            except Exception as e:
-                logger.warning(f"Ошибка загрузки данных проекта {project_id}: {e}")
-                all_data["projects"][str(project_id)] = {"subprojects": {}, "user_subprojects": []}
-
-        logger.info(f"Предзагрузка завершена для пользователя {username}. Проектов: {len(project_ids)}")
-        return JSONResponse(all_data)
-
-    except Exception as e:
-        logger.exception("Ошибка в /preload-data")
-        return JSONResponse(content={"error": f"Ошибка предзагрузки: {str(e)}"}, status_code=500)
 
 @app.get("/ping")
 async def ping():
@@ -511,11 +483,11 @@ async def serve_form_data(username: str = Query(None)):
             "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
             "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
             "username_to_executor": username_to_executor,
-            "username_to_team": username_to_team
+            "username_to_team": username_to_team,
+            "all_project_ids": BITRIX_PROJECT_ID  # <-- Добавьте эту строку
         }
 
         return JSONResponse({**fields_data, "position_map": position_map, "team_map": team_map})
-
     except Exception as e:
         logger.exception("Ошибка в /form-data")
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
