@@ -396,6 +396,7 @@ async def serve_form_data(username: str = Query(None)):
             logger.warning(f"Google Sheets user_data недоступен: {e}")
             users = []
 
+
         # --- проекты под пользователя ---
         user_projects = []
         if username:
@@ -454,22 +455,72 @@ async def serve_form_data(username: str = Query(None)):
             "username_to_team": username_to_team
         }
 
-        all_data = {}
+        def build_user_filtered_tasks(tasks: list[dict], bitrix_id: int) -> list[dict]:
+            """
+            Оставляет только задачи, где пользователь участвует (responsible/accomplices),
+            плюс всех предков этих задач до корня, чтобы селекты могли корректно навигировать.
+            """
 
-        # если есть Bitrix ID
+            # нормализация ID/parentId/responsible/accomplices (учитываем разный регистр ключей)
+            def tid(t):
+                return int(t.get("id") or t.get("ID") or 0)
+
+            def pid(t):
+                return int(t.get("parentId", t.get("PARENT_ID", 0)) or 0)
+
+            def resp(t):
+                return int(t.get("responsibleId", t.get("RESPONSIBLE_ID", 0)) or 0)
+
+            def accs(t):
+                arr = t.get("accomplices") or t.get("ACCOMPLICES") or []
+                return [int(x) for x in arr if x]
+
+            by_id = {tid(t): t for t in tasks}
+            keep = set()
+
+            # 1) отмечаем все задачи, где юзер участвует
+            involved = {tid(t) for t in tasks if bitrix_id in [resp(t)] + accs(t)}
+            keep |= involved
+
+            # 2) поднимаем предков до корня
+            for iid in list(involved):
+                cur = by_id.get(iid)
+                while cur:
+                    p = pid(cur)
+                    if p <= 0: break
+                    if p in keep: break
+                    keep.add(p)
+                    cur = by_id.get(p)
+
+            # итоговый список
+            return [by_id[i] for i in keep if i in by_id]
+
+        all_data = {}
+        bitrix_tasks_user = {}
+
         if bitrix_id:
+            # Загружаем задачи по всем проектам (можно ваша параллельная версия)
             for pid in BITRIX_PROJECT_ID:
                 all_tasks = get_all_project_tasks(pid)
                 all_data[pid] = all_tasks
+
+                # если проект есть в списке "моих", строим отфильтрованный массив
+                # (user_projects содержат строки вида "[ID] - NAME" → вытащим ID)
+                is_user_project = any(f"[{pid}]" in p for p in user_projects)
+                if is_user_project:
+                    bitrix_tasks_user[pid] = build_user_filtered_tasks(all_tasks, bitrix_id)
+        else:
+            # без bitrix_id просто вернём пустой user-пакет
+            bitrix_tasks_user = {}
 
         return JSONResponse({
             **fields_data,
             "position_map": position_map,
             "team_map": team_map,
-            "projects": user_projects,
-            "bitrix_tasks": all_data  # тут сразу всё дерево задач
+            "projects": user_projects,  # уже отфильтрованные проекты
+            "bitrix_tasks": all_data,  # полный пакет (на всякий случай)
+            "bitrix_tasks_user": bitrix_tasks_user  # только "мои" ветки
         })
-
     except Exception as e:
         logger.exception("Ошибка в /form-data")
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
