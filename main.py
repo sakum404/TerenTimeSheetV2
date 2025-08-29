@@ -14,10 +14,12 @@ from threading import Thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
-
+from functools import lru_cache
 import requests
+import time
+from typing import Dict, List
 
-#NOTORIGIN2
+#NOTORIGIN3
 # --- Настройки из переменных окружения ---
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -39,6 +41,10 @@ SPREADSHEET_NAME = "TerenTimeSheetV2"
 PROJECTS_SHEET = "projects_sheet"
 LOG_SHEET = "WebAppData"
 USER_SHEET = "user_data"
+
+PROJECTS_CACHE: Dict[int, List] = {}
+SUBPROJECTS_CACHE: Dict[int, List] = {}
+TASKS_CACHE: Dict[int, List] = {}
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
@@ -340,6 +346,34 @@ def get_user_bitrix_id(username: str) -> int | None:
         logger.error(f"Ошибка получения bitrix_id: {e}")
         return None
 
+# Кэш на 5 минут
+@lru_cache(maxsize=128)
+def get_bitrix_project_info_cached(project_id: int) -> str:
+    return get_bitrix_project_info(project_id)
+
+@lru_cache(maxsize=512)
+def get_user_projects_cached(bitrix_id: int, cache_time: float = 300) -> list:
+    # Используем timestamp для инвалидации кэша
+    return get_user_projects(bitrix_id)
+
+
+def preload_projects_data():
+    """Предзагрузка данных проектов"""
+    try:
+        logger.info("Начинаем предзагрузку данных проектов...")
+        for pid in BITRIX_PROJECT_ID:
+            # Загружаем подпроекты
+            subs = get_bitrix_subprojects(pid)
+            SUBPROJECTS_CACHE[pid] = subs
+
+            # Предзагружаем задачи для каждого подпроекта
+            for sub in subs:
+                tasks = get_bitrix_tasks(sub['id'])
+                TASKS_CACHE[sub['id']] = tasks
+
+        logger.info("Предзагрузка данных завершена")
+    except Exception as e:
+        logger.error(f"Ошибка предзагрузки: {e}")
 
 @app.get("/ping")
 async def ping():
@@ -379,7 +413,7 @@ async def serve_form_data(username: str = Query(None)):
         if not user_projects:
             for pid in BITRIX_PROJECT_ID:
                 try:
-                    pinfo = get_bitrix_project_info(pid)
+                    pinfo = get_bitrix_project_info_cached(pid)
                     if pinfo:
                         user_projects.append(pinfo)
                 except Exception as e:
@@ -432,18 +466,25 @@ async def serve_form_data(username: str = Query(None)):
         return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
 
 
-
 @app.get("/subprojects")
 async def subprojects(project_id: int, username: str = Query(None)):
     try:
-        subs = []
+        # Используем кэш если есть
+        if project_id in SUBPROJECTS_CACHE:
+            subs_data = SUBPROJECTS_CACHE[project_id]
+        else:
+            subs_data = get_bitrix_subprojects(project_id)
+            SUBPROJECTS_CACHE[project_id] = subs_data
+
+        subs = [f"[{s['id']}] - {s['title']}" for s in subs_data]
+
+        # Фильтрация по пользователю если нужно
         bitrix_id = get_user_bitrix_id(username) if username else None
         if bitrix_id:
-            subs = get_user_subprojects(project_id, bitrix_id)
-        else:
-            # fallback: все подпроекты
-            subs_full = get_bitrix_subprojects(project_id)
-            subs = [f"[{s['id']}] - {s['title']}" for s in subs_full]
+            user_subs = get_user_subprojects(project_id, bitrix_id)
+            # Фильтруем только те, что есть в пользовательских
+            subs = [s for s in subs if any(str(s).startswith(f"[{us_id}]") for us_id in user_subs)]
+
         return JSONResponse({"subprojects": subs})
     except Exception as e:
         logger.exception("Ошибка в /subprojects")
@@ -453,14 +494,21 @@ async def subprojects(project_id: int, username: str = Query(None)):
 @app.get("/tasks")
 async def tasks(subproject_id: int, username: str = Query(None)):
     try:
-        tasks_resp = []
+        # Используем кэш
+        if subproject_id in TASKS_CACHE:
+            tasks_data = TASKS_CACHE[subproject_id]
+        else:
+            tasks_data = get_bitrix_tasks(subproject_id)
+            TASKS_CACHE[subproject_id] = tasks_data
+
+        tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_data]
+
+        # Фильтрация по пользователю
         bitrix_id = get_user_bitrix_id(username) if username else None
         if bitrix_id:
-            tasks_resp = get_user_tasks(subproject_id, bitrix_id)
-        else:
-            # fallback: все задачи
-            tasks_list = get_bitrix_tasks(subproject_id)
-            tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_list]
+            user_tasks = get_user_tasks(subproject_id, bitrix_id)
+            tasks_resp = [t for t in tasks_resp if t in user_tasks]
+
         return JSONResponse({"tasks": tasks_resp})
     except Exception as e:
         logger.exception("Ошибка в /tasks")
@@ -551,6 +599,7 @@ def run_telegram():
 
 # --- Запуск в отдельном потоке ---
 if __name__ == "__main__":
+    Thread(target=preload_projects_data, daemon=True).start()
     Thread(target=run_telegram, daemon=True).start()
 
     import uvicorn
