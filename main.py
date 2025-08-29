@@ -14,8 +14,7 @@ from threading import Thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
-from functools import lru_cache
-import time
+
 import requests
 
 #NOTORIGIN2
@@ -67,23 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Кэширование на 5 минут
-@lru_cache(maxsize=100)
-def get_bitrix_project_info_cached(project_id: int) -> str:
-    return get_bitrix_project_info(project_id)
-
-@lru_cache(maxsize=100)
-def get_user_projects_cached(bitrix_id: int) -> list:
-    return get_user_projects(bitrix_id)
-
-@lru_cache(maxsize=100)
-def get_user_subprojects_cached(project_id: int, bitrix_id: int) -> list:
-    return get_user_subprojects(project_id, bitrix_id)
-
-@lru_cache(maxsize=100)
-def get_user_tasks_cached(subproject_id: int, bitrix_id: int) -> list:
-    return get_user_tasks(subproject_id, bitrix_id)
 
 def is_user_allowed(username: str) -> bool:
     """Проверяет, есть ли username в Google Sheets (лист user_data)"""
@@ -149,92 +131,23 @@ def get_bitrix_tasks(subproject_id: int):
 
 
 def get_user_projects(bitrix_id: int):
-    """Оптимизированная версия с батчингом"""
+    """Возвращает проекты, где пользователь участвует (включая подзадачи)"""
     projects = []
     try:
-        # Получаем информацию о всех проектах сразу
-        project_infos = {}
         for pid in BITRIX_PROJECT_ID:
-            project_infos[pid] = get_bitrix_project_info_cached(pid)
+            logger.info(f"Checking project {pid} for user {bitrix_id}")
 
-        # Параллельная проверка участия в проектах
-        for pid in BITRIX_PROJECT_ID:
-            if is_user_in_project_tasks_optimized(pid, bitrix_id):
-                project_name = project_infos.get(pid)
+            # Проверяем все задачи в проекте рекурсивно
+            if is_user_in_project_tasks(pid, bitrix_id):
+                project_name = get_bitrix_project_info(pid)
                 if project_name and project_name not in projects:
                     projects.append(project_name)
+                    logger.info(f"User found in project {pid}: {project_name}")
 
     except Exception as e:
         logger.error(f"Ошибка поиска проектов для {bitrix_id}: {e}")
     return projects
 
-def is_user_in_project_tasks_optimized(project_id: int, bitrix_id: int) -> bool:
-    """Оптимизированная проверка с ограничением глубины"""
-    try:
-        # Ограничиваем глубину рекурсии для производительности
-        return _check_tasks_recursive(project_id, bitrix_id, parent_id=0, depth=0, max_depth=3)
-    except Exception as e:
-        logger.error(f"Ошибка проверки задач проекта {project_id}: {e}")
-        return False
-
-
-def _check_tasks_recursive(project_id: int, bitrix_id: int, parent_id: int, depth: int, max_depth: int) -> bool:
-    if depth > max_depth:
-        return False
-
-    try:
-        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
-        params = {
-            "filter[GROUP_ID]": project_id,
-            "select[]": ["ID", "RESPONSIBLE_ID", "ACCOMPLICES"]
-        }
-
-        if parent_id > 0:
-            params["filter[PARENT_ID]"] = parent_id
-        else:
-            params["filter[PARENT_ID]"] = 0
-
-        response = requests.get(url, params=params)
-        data = response.json()
-
-        if "result" not in data:
-            return False
-
-        for task in data["result"]["tasks"]:
-            responsible = int(task.get("responsibleId", 0))
-            accomplices = [int(x) for x in task.get("accomplices", []) if x]
-
-            if bitrix_id in [responsible] + accomplices:
-                return True
-
-            # Проверяем подзадачи только если не превышена глубина
-            if depth < max_depth:
-                task_id = task.get("id")
-                if task_id and _check_tasks_recursive(project_id, bitrix_id, task_id, depth + 1, max_depth):
-                    return True
-
-    except Exception as e:
-        logger.error(f"Ошибка рекурсивной проверки задач: {e}")
-
-    return False
-
-def get_bitrix_tasks_paginated(subproject_id: int, page: int = 1, page_size: int = 50):
-    """Получение задач с пагинацией"""
-    try:
-        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
-        response = requests.get(url, params={
-            "filter[PARENT_ID]": subproject_id,
-            "select[]": ["ID", "TITLE"],
-            "start": (page - 1) * page_size,
-            "order[ID]": "ASC"
-        })
-        data = response.json()
-        if "result" in data:
-            return [{"id": t["id"], "title": t["title"]} for t in data["result"]["tasks"]]
-        return []
-    except Exception as e:
-        logger.error(f"Ошибка получения задач с пагинацией: {e}")
-        return []
 
 def is_user_in_project_tasks(project_id: int, bitrix_id: int, parent_id: int = 0) -> bool:
     """Рекурсивно проверяет, есть ли пользователь в задачах проекта"""
@@ -426,6 +339,21 @@ def get_user_bitrix_id(username: str) -> int | None:
     except Exception as e:
         logger.error(f"Ошибка получения bitrix_id: {e}")
         return None
+
+
+# Новый эндпоинт: все подпроекты + их подзадачи, где участвует пользователь
+@app.get("/project-tree")
+async def project_tree(project_id: int, username: str = Query(None)):
+    bitrix_id = get_user_bitrix_id(username) if username else None
+    # 1) Получаем подпроекты верхнего уровня
+    subs = get_user_subprojects(project_id, bitrix_id)  # ["[123]- Title", ...]
+    # 2) Для каждого подпроекта параллельно тянем задачи
+    tree = []
+    for sub in subs:
+        sid = int(sub.split("]")[0].split("[")[1])
+        tasks = get_user_tasks(sid, bitrix_id)  # ["[456]- Title", ...]
+        tree.append({"subproject": sub, "tasks": tasks})
+    return JSONResponse({"tree": tree})
 
 
 @app.get("/ping")
