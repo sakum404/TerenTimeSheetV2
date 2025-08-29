@@ -14,7 +14,7 @@ from threading import Thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from collections import OrderedDict
-from datetime import datetime, timedelta
+
 import requests
 
 #NOTORIGIN2
@@ -66,48 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-bitrix_cache = {
-    "last_updated": datetime.min,
-    "projects": [],
-    "subprojects": {},  # project_id: [{id, title}]
-    "tasks": {},        # subproject_id: [{id, title}]
-}
-
-def update_bitrix_cache():
-    global bitrix_cache
-    try:
-        now = datetime.now()
-        if now - bitrix_cache["last_updated"] < timedelta(minutes=5):
-            return  # кэш ещё свежий
-
-        logger.info("🔄 Обновление Bitrix кэша...")
-
-        projects = []
-        subprojects = {}
-        tasks = {}
-
-        for pid in BITRIX_PROJECT_ID:
-            pname = get_bitrix_project_info(pid)
-            if pname:
-                projects.append(pname)
-                subs = get_bitrix_subprojects(pid)
-                subprojects[pid] = subs
-                for sub in subs:
-                    tasks[sub["id"]] = get_bitrix_tasks(sub["id"])
-
-        bitrix_cache.update({
-            "last_updated": now,
-            "projects": projects,
-            "subprojects": subprojects,
-            "tasks": tasks
-        })
-
-        logger.info("✅ Bitrix кэш обновлён")
-
-    except Exception as e:
-        logger.exception("❌ Ошибка обновления Bitrix кэша")
-
 
 def is_user_allowed(username: str) -> bool:
     """Проверяет, есть ли username в Google Sheets (лист user_data)"""
@@ -201,7 +159,7 @@ def is_user_in_project_tasks(project_id: int, bitrix_id: int, parent_id: int = 0
         }
 
         # Если проверяем подзадачи конкретного родителя
-        if int(parent_id) > 0:
+        if parent_id > 0:
             params["filter[PARENT_ID]"] = parent_id
         else:
             # Проверяем только задачи верхнего уровня
@@ -394,7 +352,6 @@ async def serve_form():
 
 @app.get("/form-data")
 async def serve_form_data(username: str = Query(None)):
-    update_bitrix_cache()  # каждый раз перед формой
     try:
         # --- данные по проектам (period, task, time_frame, difficulty_level) ---
         try:
@@ -457,21 +414,16 @@ async def serve_form_data(username: str = Query(None)):
             if telegram_username and team:
                 username_to_team[telegram_username] = team
 
-            fields_data = {
-                "projects": user_projects,
-                "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
-                "task": sorted(set(row["task"] for row in data if row.get("task"))),
-                "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
-                "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
-                "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
-                "username_to_executor": username_to_executor,
-                "username_to_team": username_to_team,
-                "subprojects_map": bitrix_cache["subprojects"],
-                "tasks_map": bitrix_cache["tasks"],
-                "position_map": position_map,
-                "team_map": team_map,
-            }
-
+        fields_data = {
+            "projects": user_projects,
+            "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
+            "task": sorted(set(row["task"] for row in data if row.get("task"))),
+            "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
+            "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
+            "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
+            "username_to_executor": username_to_executor,
+            "username_to_team": username_to_team
+        }
 
         return JSONResponse({**fields_data, "position_map": position_map, "team_map": team_map})
 
