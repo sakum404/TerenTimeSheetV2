@@ -131,25 +131,34 @@ def get_bitrix_subprojects(project_id: int):
         return []
 
 
-def get_bitrix_tasks(subproject_id: int):
-    """Возвращает список подзадач внутри подпроекта"""
+def get_bitrix_tasks(parent_id: int):
+    """Возвращает список всех задач (включая подзадачи) внутри родительской задачи"""
     try:
         url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
         response = requests.get(url, params={
-            "filter[PARENT_ID]": subproject_id,
+            "filter[PARENT_ID]": parent_id,
             "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
         })
         data = response.json()
-        if "result" in data:
-            return [{
-                "id": t["id"],
-                "title": t["title"],
-                "responsible_id": int(t.get("responsibleId", 0)),
-                "accomplices": [int(x) for x in t.get("accomplices", []) if x]
-            } for t in data["result"]["tasks"]]
-        return []
+
+        tasks = []
+        if "result" in data and "tasks" in data["result"]:
+            for task_data in data["result"]["tasks"]:
+                task = {
+                    "id": task_data["id"],
+                    "title": task_data["title"],
+                    "responsible_id": int(task_data.get("responsibleId", 0)),
+                    "accomplices": [int(x) for x in task_data.get("accomplices", []) if x]
+                }
+                tasks.append(task)
+
+                # Рекурсивно получаем подзадачи этой задачи
+                subtasks = get_bitrix_tasks(task["id"])
+                tasks.extend(subtasks)
+
+        return tasks
     except Exception as e:
-        logger.error(f"Ошибка получения задач из Bitrix: {e}")
+        logger.error(f"Ошибка получения задач для родителя {parent_id}: {e}")
         return []
 
 
@@ -209,10 +218,10 @@ def preload_all_bitrix_data():
                     sub_users = get_task_users(subproject)
                     SUBPROJECT_USER_MAP[sub_id] = sub_users
 
-                # Для каждого подпроекта загружаем ВСЕ задачи
+                # Для каждого подпроекта загружаем ВСЕ задачи (включая подзадачи)
                 for subproject in subprojects:
                     sub_id = subproject['id']
-                    tasks = get_bitrix_tasks(sub_id)
+                    tasks = get_bitrix_tasks(sub_id)  # Теперь получаем все задачи рекурсивно
                     ALL_TASKS_DATA[sub_id] = tasks
                     total_tasks += len(tasks)
 
@@ -398,17 +407,22 @@ async def subprojects(project_id: int, username: str = Query(None)):
 @app.get("/tasks")
 async def tasks(subproject_id: int, username: str = Query(None)):
     try:
+        logger.info(f"Запрос задач для подпроекта {subproject_id}, пользователь {username}")
+
         # Берем из предзагруженного кэша
         tasks_data = ALL_TASKS_DATA.get(subproject_id, [])
+        logger.info(f"Найдено задач в кэше: {len(tasks_data)}")
 
         # Фильтрация по пользователю
         bitrix_id = get_user_bitrix_id(username) if username else None
         if bitrix_id:
             # Только задачи пользователя
             tasks_resp = get_user_tasks(subproject_id, bitrix_id)
+            logger.info(f"Задач пользователя {bitrix_id}: {len(tasks_resp)}")
         else:
             # Все задачи
             tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_data]
+            logger.info(f"Всех задач: {len(tasks_resp)}")
 
         return JSONResponse({"tasks": tasks_resp})
     except Exception as e:
