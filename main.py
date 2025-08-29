@@ -95,18 +95,14 @@ def is_user_allowed(username: str) -> bool:
 def get_bitrix_project_info(project_id: int) -> str:
     """Возвращает строку вида [ID] - NAME для проекта"""
     try:
-        url = f"{BITRIX_WEBHOOK}sonet_group.get"
+        url = f"{BITRIX_WEBHOOK}sonet_group.get.json"
         response = requests.get(url, params={"FILTER[ID]": project_id})
         data = response.json()
-
-        logger.info(f"Ответ от Bitrix для проекта {project_id}: {data}")
-
-        if data.get("result"):
-            projects = data["result"]
-            if projects:
-                project = projects[0]
-                return f"[{project.get('ID', project_id)}] - {project.get('NAME', 'Неизвестно')}"
-        return f"Не найден проект {project_id}"
+        if "result" in data and data["result"]:
+            project = data["result"][0]
+            return f"[{project['ID']}] - {project['NAME']}"
+        else:
+            return f"Не найден проект {project_id}"
     except Exception as e:
         logger.error(f"Ошибка получения проекта из Bitrix: {e}")
         return f"Ошибка {project_id}"
@@ -115,69 +111,45 @@ def get_bitrix_project_info(project_id: int) -> str:
 def get_bitrix_subprojects(project_id: int):
     """Возвращает список подпроектов (верхнеуровневых задач) внутри проекта"""
     try:
-        url = f"{BITRIX_WEBHOOK}tasks.task.list"
-        params = {
-            "FILTER[GROUP_ID]": project_id,
-            "FILTER[PARENT_ID]": "0",  # только задачи верхнего уровня
-            "SELECT[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
-        }
-
-        response = requests.get(url, params=params)
+        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
+        response = requests.get(url, params={
+            "filter[GROUP_ID]": project_id,
+            "filter[PARENT_ID]": 0,
+            "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
+        })
         data = response.json()
-
-        logger.info(f"Ответ от Bitrix для подпроектов проекта {project_id}: {data}")
-
-        if data.get("result"):
-            tasks = data["result"].get("tasks", [])
-            subprojects = []
-            for task_id, task_data in tasks.items():
-                subprojects.append({
-                    "id": int(task_id),
-                    "title": task_data.get("title", ""),
-                    "responsible_id": int(task_data.get("responsibleId", 0)),
-                    "accomplices": [int(x) for x in task_data.get("accomplices", []) if x]
-                })
-            return subprojects
+        if "result" in data:
+            return [{
+                "id": t["id"],
+                "title": t["title"],
+                "responsible_id": int(t.get("responsibleId", 0)),
+                "accomplices": [int(x) for x in t.get("accomplices", []) if x]
+            } for t in data["result"]["tasks"]]
         return []
     except Exception as e:
         logger.error(f"Ошибка получения подпроектов из Bitrix: {e}")
         return []
 
 
-def get_bitrix_tasks(parent_id: int):
-    """Возвращает список всех задач (включая подзадачи) внутри родительской задачи"""
+def get_bitrix_tasks(subproject_id: int):
+    """Возвращает список подзадач внутри подпроекта"""
     try:
-        url = f"{BITRIX_WEBHOOK}tasks.task.list"
-        params = {
-            "FILTER[PARENT_ID]": parent_id,
-            "SELECT[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
-        }
-
-        response = requests.get(url, params=params)
+        url = f"{BITRIX_WEBHOOK}tasks.task.list.json"
+        response = requests.get(url, params={
+            "filter[PARENT_ID]": subproject_id,
+            "select[]": ["ID", "TITLE", "RESPONSIBLE_ID", "ACCOMPLICES"]
+        })
         data = response.json()
-
-        logger.info(f"Ответ от Bitrix для задач родителя {parent_id}: {data}")
-
-        tasks = []
-        if data.get("result"):
-            task_items = data["result"].get("tasks", {})
-            for task_id, task_data in task_items.items():
-                task = {
-                    "id": int(task_id),
-                    "title": task_data.get("title", ""),
-                    "responsible_id": int(task_data.get("responsibleId", 0)),
-                    "accomplices": [int(x) for x in task_data.get("accomplices", []) if x]
-                }
-                tasks.append(task)
-
-                # Рекурсивно получаем подзадачи этой задачи
-                logger.info(f"Ищем подзадачи для задачи {task_id}")
-                subtasks = get_bitrix_tasks(task["id"])
-                tasks.extend(subtasks)
-
-        return tasks
+        if "result" in data:
+            return [{
+                "id": t["id"],
+                "title": t["title"],
+                "responsible_id": int(t.get("responsibleId", 0)),
+                "accomplices": [int(x) for x in t.get("accomplices", []) if x]
+            } for t in data["result"]["tasks"]]
+        return []
     except Exception as e:
-        logger.error(f"Ошибка получения задач для родителя {parent_id}: {e}")
+        logger.error(f"Ошибка получения задач из Bitrix: {e}")
         return []
 
 
@@ -220,40 +192,29 @@ def preload_all_bitrix_data():
 
         for pid in BITRIX_PROJECT_ID:
             try:
-                logger.info(f"🔍 Загружаем проект {pid}...")
-
                 # Загружаем информацию о проекте
                 project_info = get_bitrix_project_info(pid)
                 ALL_PROJECTS_DATA[pid] = project_info
                 logger.info(f"✅ Загружен проект: {project_info}")
 
                 # Загружаем ВСЕ подпроекты проекта
-                logger.info(f"📂 Загружаем подпроекты для проекта {pid}...")
                 subprojects = get_bitrix_subprojects(pid)
                 ALL_SUBPROJECTS_DATA[pid] = subprojects
                 total_subprojects += len(subprojects)
-                logger.info(f"   Найдено подпроектов: {len(subprojects)}")
-
-                if not subprojects:
-                    logger.warning(f"   ⚠️ Не найдено подпроектов для проекта {pid}")
-                    continue
+                logger.info(f"   📂 Подпроектов: {len(subprojects)}")
 
                 # Сохраняем пользователей для каждого подпроекта
                 for subproject in subprojects:
                     sub_id = subproject['id']
                     sub_users = get_task_users(subproject)
                     SUBPROJECT_USER_MAP[sub_id] = sub_users
-                    logger.info(f"   👥 Пользователи подпроекта {sub_id}: {sub_users}")
 
-                # Для каждого подпроекта загружаем ВСЕ задачи (включая подзадачи)
+                # Для каждого подпроекта загружаем ВСЕ задачи
                 for subproject in subprojects:
                     sub_id = subproject['id']
-                    logger.info(f"   📝 Загружаем задачи для подпроекта {sub_id}...")
                     tasks = get_bitrix_tasks(sub_id)
                     ALL_TASKS_DATA[sub_id] = tasks
                     total_tasks += len(tasks)
-
-                    logger.info(f"     Найдено задач: {len(tasks)}")
 
                     # Сохраняем пользователей для каждой задачи
                     for task in tasks:
@@ -261,7 +222,7 @@ def preload_all_bitrix_data():
                         TASK_USER_MAP[task['id']] = task_users
 
                     if tasks:
-                        logger.info(f"     📋 Задачи: {[t['id'] for t in tasks]}")
+                        logger.info(f"     📝 Задач в подпроекте {sub_id}: {len(tasks)}")
 
             except Exception as e:
                 logger.error(f"❌ Ошибка загрузки проекта {pid}: {e}")
@@ -270,6 +231,8 @@ def preload_all_bitrix_data():
         logger.info(f"   📊 Проектов: {len(ALL_PROJECTS_DATA)}")
         logger.info(f"   📁 Подпроектов: {total_subprojects}")
         logger.info(f"   📋 Задач: {total_tasks}")
+        logger.info(f"   👥 Пользователей в подпроектах: {sum(len(users) for users in SUBPROJECT_USER_MAP.values())}")
+        logger.info(f"   👥 Пользователей в задачах: {sum(len(users) for users in TASK_USER_MAP.values())}")
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка предзагрузки: {e}")
@@ -326,20 +289,6 @@ def get_user_tasks(subproject_id: int, bitrix_id: int) -> List[str]:
         logger.error(f"Ошибка поиска задач: {e}")
         return []
 
-
-@app.get("/debug/tasks/{subproject_id}")
-async def debug_tasks(subproject_id: int):
-    """Endpoint для отладки - показывает сырые данные из кэша"""
-    try:
-        tasks_data = ALL_TASKS_DATA.get(subproject_id, [])
-        return JSONResponse({
-            "subproject_id": subproject_id,
-            "tasks_count": len(tasks_data),
-            "tasks": tasks_data,
-            "user_map": {task['id']: TASK_USER_MAP.get(task['id'], set()) for task in tasks_data}
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)})
 
 @app.get("/ping")
 async def ping():
@@ -449,22 +398,17 @@ async def subprojects(project_id: int, username: str = Query(None)):
 @app.get("/tasks")
 async def tasks(subproject_id: int, username: str = Query(None)):
     try:
-        logger.info(f"Запрос задач для подпроекта {subproject_id}, пользователь {username}")
-
         # Берем из предзагруженного кэша
         tasks_data = ALL_TASKS_DATA.get(subproject_id, [])
-        logger.info(f"Найдено задач в кэше: {len(tasks_data)}")
 
         # Фильтрация по пользователю
         bitrix_id = get_user_bitrix_id(username) if username else None
         if bitrix_id:
             # Только задачи пользователя
             tasks_resp = get_user_tasks(subproject_id, bitrix_id)
-            logger.info(f"Задач пользователя {bitrix_id}: {len(tasks_resp)}")
         else:
             # Все задачи
             tasks_resp = [f"[{t['id']}] - {t['title']}" for t in tasks_data]
-            logger.info(f"Всех задач: {len(tasks_resp)}")
 
         return JSONResponse({"tasks": tasks_resp})
     except Exception as e:
