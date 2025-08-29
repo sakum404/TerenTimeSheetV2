@@ -341,21 +341,6 @@ def get_user_bitrix_id(username: str) -> int | None:
         return None
 
 
-# Новый эндпоинт: все подпроекты + их подзадачи, где участвует пользователь
-@app.get("/project-tree")
-async def project_tree(project_id: int, username: str = Query(None)):
-    bitrix_id = get_user_bitrix_id(username) if username else None
-    # 1) Получаем подпроекты верхнего уровня
-    subs = get_user_subprojects(project_id, bitrix_id)  # ["[123]- Title", ...]
-    # 2) Для каждого подпроекта параллельно тянем задачи
-    tree = []
-    for sub in subs:
-        sid = int(sub.split("]")[0].split("[")[1])
-        tasks = get_user_tasks(sid, bitrix_id)  # ["[456]- Title", ...]
-        tree.append({"subproject": sub, "tasks": tasks})
-    return JSONResponse({"tree": tree})
-
-
 @app.get("/ping")
 async def ping():
     return PlainTextResponse("pong")
@@ -439,6 +424,26 @@ async def serve_form_data(username: str = Query(None)):
             "username_to_executor": username_to_executor,
             "username_to_team": username_to_team
         }
+
+        subprojects_map = {}
+        tasks_map = {}
+
+        for pid in BITRIX_PROJECT_ID:
+            try:
+                # Получаем список подпроектов
+                subs = get_bitrix_subprojects(pid)
+                subprojects_map[pid] = subs
+
+                # Для каждого подпроекта получаем задачи
+                for sub in subs:
+                    sub_id = sub["id"]
+                    tasks = get_bitrix_tasks(sub_id)
+                    tasks_map[sub_id] = tasks
+            except Exception as e:
+                logger.warning(f"Ошибка при предзагрузке подпроектов/задач: {e}")
+
+        fields_data["subprojects_map"] = subprojects_map
+        fields_data["tasks_map"] = tasks_map
 
         return JSONResponse({**fields_data, "position_map": position_map, "team_map": team_map})
 
