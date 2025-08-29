@@ -141,7 +141,9 @@ def _list_user_tasks_in_project_fast(project_id: int, bitrix_id: int, top: int =
 def _resolve_roots_for_tasks(task_items: list):
     if not task_items:
         return {}, {}
-    parent = {int(t["id"]): int(t.get("parentId") or t.get("PARENT_ID") or 0) for t in task_items}
+    def _gid(v, key_low, key_up):
+        return int(v.get(key_low) or v.get(key_up) or 0)
+    parent = {int(t.get("id") or t.get("ID")): _gid(t, "parentId", "PARENT_ID") for t in task_items if t.get("id") or t.get("ID")}
     known = set(parent.keys())
     to_fetch = {pid for pid in parent.values() if pid and pid not in known}
     while to_fetch:
@@ -149,12 +151,13 @@ def _resolve_roots_for_tasks(task_items: list):
         cmd = {f"k{i}": f"tasks.task.get?taskId={tid}" for i, tid in enumerate(batch, 1)}
         res = _bx_batch(cmd).get("result", {}).get("result", {})
         for v in res.values():
-            if isinstance(v, dict) and v.get("result"):
-                tt = v["result"]
-                tid = int(tt["id"])
-                pid = int(tt.get("parentId") or 0)
-                parent[tid] = pid
-        known |= set(batch)
+            task = _bx_unpack_task_result(v)
+            if task:
+                tid = _gid(task, "id", "ID")
+                pid = _gid(task, "parentId", "PARENT_ID")
+                if tid:
+                    parent[tid] = pid
+                    known.add(tid)
         to_fetch = {pid for pid in parent.values() if pid and pid not in known}
     root_for = {}
     for tid in list(parent.keys()):
@@ -173,9 +176,12 @@ def _resolve_roots_for_tasks(task_items: list):
         cmd = {f"t{i2}": f"tasks.task.get?taskId={tid}" for i2, tid in enumerate(part, 1)}
         res = _bx_batch(cmd).get("result", {}).get("result", {})
         for v in res.values():
-            if isinstance(v, dict) and v.get("result"):
-                tt = v["result"]
-                titles[int(tt["id"])] = tt.get("title") or f"Task {tt['id']}"
+            task = _bx_unpack_task_result(v)
+            if task:
+                tid = _gid(task, "id", "ID")
+                title = task.get("title") or task.get("TITLE")
+                if tid:
+                    titles[tid] = title or f"Task {tid}"
     return root_for, titles
 # ======== /Performance helpers ========
 app.add_middleware(
@@ -414,8 +420,7 @@ def has_user_in_subtasks(project_id: int, parent_task_id: int, bitrix_id: int) -
 def get_user_tasks(subproject_id: int, bitrix_id: int):
     """Возвращает задачи подпроекта, где участвует пользователь (без глубокой рекурсии)."""
     try:
-        root_info = _bx_get("tasks.task.get", {"taskId": subproject_id}).get("result", {})
-        project_id = int(root_info.get("groupId") or 0) if root_info else 0
+        raw = _bx_get("tasks.task.get", {"taskId": subproject_id}); root_info = _bx_unpack_task_result(raw); project_id = int(root_info.get("groupId") or root_info.get("GROUP_ID") or 0) if root_info else 0
         if not project_id:
             return []
         tasks = _list_user_tasks_in_project_fast(project_id, bitrix_id, top=3000)
