@@ -381,31 +381,90 @@ async def serve_form():
 @app.get("/form-data")
 async def serve_form_data(username: str = Query(None)):
     try:
-        bitrix_id = None  # ← добавьте это сразу
-        # --- данные по проектам (period, task, time_frame, difficulty_level) ---
+        bitrix_id = None
+
+        # --- 1) Загружаем исходные данные из Google Sheets ---
         try:
-            data = project_sheet.get_all_records()
+            data = project_sheet.get_all_records()  # лист projects_sheet
         except Exception as e:
             logger.warning(f"Google Sheets projects_sheet недоступен: {e}")
             data = []
 
-        # --- данные по пользователям ---
         try:
-            users = user_sheet.get_all_records()
+            users = user_sheet.get_all_records()    # лист user_data
         except Exception as e:
             logger.warning(f"Google Sheets user_data недоступен: {e}")
             users = []
 
+        # --- 2) Карты должностей/команд/username → executor/team ---
+        position_map: dict[str, str] = {}
+        team_map: dict[str, list[str]] = {}
+        username_to_executor: dict[str, str] = {}
+        username_to_team: dict[str, str] = {}
 
-        # --- проекты под пользователя ---
-        user_projects = []
+        for row in users:
+            # position_map
+            name = (row.get("executor") or "").strip()
+            pos = (row.get("position") or "").strip()
+            if name and pos:
+                position_map[name] = pos
+
+            # team_map
+            team = (row.get("team") or "").strip()
+            executor = (row.get("executor") or "").strip()
+            if team and executor:
+                team_map.setdefault(team, []).append(executor)
+
+            # username → executor/team
+            telegram_username = (row.get("telegram_username") or "").lstrip("@").strip().lower()
+            if telegram_username:
+                if executor:
+                    username_to_executor[telegram_username] = executor
+                if team:
+                    username_to_team[telegram_username] = team
+
+        # --- 3) Справочники из projects_sheet для select'ов ---
+        period_list = list(OrderedDict.fromkeys(
+            (row.get("period") or "").strip()
+            for row in data if row.get("period")
+        ))
+        task_list = sorted(set(
+            (row.get("task") or "").strip()
+            for row in data if row.get("task")
+        ))
+        time_frame_list = sorted(set(
+            (row.get("time_frame") or "").strip()
+            for row in data if row.get("time_frame")
+        ))
+        difficulty_list = sorted(set(
+            (row.get("difficulty_level") or "").strip()
+            for row in data if row.get("difficulty_level")
+        ))
+        executor_list = sorted(set(
+            (row.get("executor") or "").strip()
+            for row in users if row.get("executor")
+        ))
+
+        fields_data = {
+            "period": period_list,
+            "task": task_list,
+            "time_frame": time_frame_list,
+            "difficulty_level": difficulty_list,
+            "executor": executor_list,
+            "username_to_executor": username_to_executor,
+            "username_to_team": username_to_team
+        }
+
+        # --- 4) Пользовательские проекты из Битрикс (если известен username) ---
+        user_projects: list[str] = []
         if username:
             bitrix_id = get_user_bitrix_id(username)
             if bitrix_id:
                 user_projects = get_user_projects(bitrix_id)
             else:
                 logger.info(f"Не найден bitrix_id для пользователя {username}")
-        # fallback (если нет username/bitrix_id) — показывать все, как раньше
+
+        # Fallback: если своих проектов нет — показываем все Битрикс-проекты из списка окружения
         if not user_projects:
             for pid in BITRIX_PROJECT_ID:
                 try:
@@ -415,53 +474,53 @@ async def serve_form_data(username: str = Query(None)):
                 except Exception as e:
                     logger.warning(f"Не удалось получить проект {pid}: {e}")
 
-        # Карта должностей
-        position_map = {}
-        # Карта команд -> исполнители
-        team_map = {}
-        # Карта username -> executor
-        username_to_executor = {}
-        # Карта username -> team
-        username_to_team = {}
+        # --- 5) Собираем иерархию из Google Sheets: projects / subprojects / subtasks ---
+        gs_projects_set: set[str] = set()
+        gs_subprojects_map: dict[str, set[str]] = {}
+        gs_tasks_map: dict[tuple[str, str], set[str]] = {}
 
-        for row in users:
-            # Заполняем position_map
-            name = row.get("executor", "")
-            pos = row.get("position", "")
-            if name and pos:
-                position_map[name] = pos
+        for row in data:
+            p = (row.get("projects") or "").strip()
+            sp = (row.get("subprojects") or "").strip()
+            st = (row.get("subtasks") or "").strip()
 
-            # Заполняем team_map
-            team = row.get("team", "")
-            executor = row.get("executor", "")
-            if team and executor:
-                team_map.setdefault(team, []).append(executor)
+            if p:
+                gs_projects_set.add(p)
+                gs_subprojects_map.setdefault(p, set())
+                if sp:
+                    gs_subprojects_map[p].add(sp)
+                    gs_tasks_map.setdefault((p, sp), set())
+                    if st:
+                        gs_tasks_map[(p, sp)].add(st)
 
-            # Заполняем маппинг username -> executor и username -> team
-            telegram_username = row.get("telegram_username", "").lstrip("@").strip().lower()
-            if telegram_username and executor:
-                username_to_executor[telegram_username] = executor
-            if telegram_username and team:
-                username_to_team[telegram_username] = team
-
-        fields_data = {
-            "projects": user_projects,
-            "period": list(OrderedDict.fromkeys(row["period"] for row in data if row.get("period"))),
-            "task": sorted(set(row["task"] for row in data if row.get("task"))),
-            "time_frame": sorted(set(row["time_frame"] for row in data if row.get("time_frame"))),
-            "difficulty_level": sorted(set(row["difficulty_level"] for row in data if row.get("difficulty_level"))),
-            "executor": sorted(set(row["executor"] for row in users if row.get("executor"))),
-            "username_to_executor": username_to_executor,
-            "username_to_team": username_to_team
+        # Преобразуем set → отсортированные структуры
+        gs_projects = sorted(gs_projects_set)
+        gs_subprojects_map_sorted: dict[str, list[str]] = {
+            k: sorted(v) for k, v in gs_subprojects_map.items()
         }
+        gs_tasks_nested: dict[str, dict[str, list[str]]] = {}
+        for (p, sp), tasks in gs_tasks_map.items():
+            gs_tasks_nested.setdefault(p, {})
+            gs_tasks_nested[p][sp] = sorted(tasks)
 
-        def build_user_filtered_tasks(tasks: list[dict], bitrix_id: int) -> list[dict]:
+        # --- 6) Объединяем список проектов: сперва Битрикс-строки "[ID] - NAME", затем GS-проекты ---
+        merged_projects: list[str] = []
+        _seen = set()
+        for p in user_projects:
+            if p not in _seen:
+                merged_projects.append(p)
+                _seen.add(p)
+        for p in gs_projects:
+            if p not in _seen:
+                merged_projects.append(p)
+                _seen.add(p)
+
+        # --- 7) Полезный пакет задач для пользователя (ветки, где он участвует) ---
+        def build_user_filtered_tasks(tasks: list[dict], _bitrix_id: int) -> list[dict]:
             """
             Оставляет только задачи, где пользователь участвует (responsible/accomplices),
             плюс всех предков этих задач до корня, чтобы селекты могли корректно навигировать.
             """
-
-            # нормализация ID/parentId/responsible/accomplices (учитываем разный регистр ключей)
             def tid(t):
                 return int(t.get("id") or t.get("ID") or 0)
 
@@ -478,34 +537,30 @@ async def serve_form_data(username: str = Query(None)):
             by_id = {tid(t): t for t in tasks}
             keep = set()
 
-            # 1) отмечаем все задачи, где юзер участвует
-            involved = {tid(t) for t in tasks if bitrix_id in [resp(t)] + accs(t)}
+            involved = {tid(t) for t in tasks if _bitrix_id in [resp(t)] + accs(t)}
             keep |= involved
 
-            # 2) поднимаем предков до корня
             for iid in list(involved):
                 cur = by_id.get(iid)
                 while cur:
                     p = pid(cur)
-                    if p <= 0: break
-                    if p in keep: break
+                    if p <= 0:
+                        break
+                    if p in keep:
+                        break
                     keep.add(p)
                     cur = by_id.get(p)
 
-            # итоговый список
             return [by_id[i] for i in keep if i in by_id]
 
-        all_data = {}
-        bitrix_tasks_user = {}
+        all_data: dict[int, list[dict]] = {}
+        bitrix_tasks_user: dict[int, list[dict]] = {}
 
         if bitrix_id:
-            # Загружаем задачи по всем проектам (можно ваша параллельная версия)
             for pid in BITRIX_PROJECT_ID:
                 all_tasks = get_all_project_tasks(pid)
                 all_data[pid] = all_tasks
 
-                # если проект есть в списке "моих", строим отфильтрованный массив
-                # (user_projects содержат строки вида "[ID] - NAME" → вытащим ID)
                 is_user_project = any(f"[{pid}]" in p for p in user_projects)
                 if is_user_project:
                     bitrix_tasks_user[pid] = build_user_filtered_tasks(all_tasks, bitrix_id)
@@ -513,17 +568,36 @@ async def serve_form_data(username: str = Query(None)):
             # без bitrix_id просто вернём пустой user-пакет
             bitrix_tasks_user = {}
 
+        # --- 8) Ответ ---
         return JSONResponse({
             **fields_data,
             "position_map": position_map,
             "team_map": team_map,
-            "projects": user_projects,  # уже отфильтрованные проекты
-            "bitrix_tasks": all_data,  # полный пакет (на всякий случай)
-            "bitrix_tasks_user": bitrix_tasks_user  # только "мои" ветки
+
+            # объединённый список проектов (Битрикс + Google Sheets)
+            "projects": merged_projects,
+
+            # полный пакет Битрикс-задач по project_id (как было)
+            "bitrix_tasks": all_data,
+
+            # только «мои» ветки задач по project_id (если есть bitrix_id)
+            "bitrix_tasks_user": bitrix_tasks_user,
+
+            # новый блок для фронта c иерархией из Google Sheets (общедоступно для всех)
+            "gs": {
+                "projects": gs_projects,
+                "subprojects_map": gs_subprojects_map_sorted,  # {project: [subprojects]}
+                "tasks_map": gs_tasks_nested                   # {project: {subproject: [subtasks]}}
+            }
         })
+
     except Exception as e:
         logger.exception("Ошибка в /form-data")
-        return JSONResponse(content={"error": f"Ошибка получения данных: {str(e)}"}, status_code=500)
+        return JSONResponse(
+            content={"error": f"Ошибка получения данных: {str(e)}"},
+            status_code=500
+        )
+
 
 
 
