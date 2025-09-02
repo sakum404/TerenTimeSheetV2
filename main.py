@@ -479,10 +479,17 @@ async def serve_form_data(username: str = Query(None)):
         gs_subprojects_map: dict[str, set[str]] = {}
         gs_tasks_map: dict[tuple[str, str], set[str]] = {}
 
-        for row in data:
-            p = (row.get("projects") or "").strip()
-            sp = (row.get("subprojects") or "").strip()
-            st = (row.get("subtasks") or "").strip()
+        def norm_row_keys(row: dict) -> dict:
+            # нормализуем ключи: " Projects " -> "projects"
+            return {(k or "").strip().lower(): row.get(k) for k in row.keys()}
+
+        for _row in data:
+            row = norm_row_keys(_row)
+
+            p = str(row.get("projects", "")).strip()
+            sp = str(row.get("subprojects", "")).strip()
+            # берём subtasks (ваша текущая колонка); если вдруг поменяете название на "tasks" — тоже подхватится
+            st = str(row.get("subtasks", row.get("tasks", ""))).strip()
 
             if p:
                 gs_projects_set.add(p)
