@@ -733,7 +733,7 @@ def receive_webapp(update: Update, context: CallbackContext):
                 data.get("time_frame", ""),
                 data.get("difficulty_level", ""),
                 data.get("time", ""),
-                data.get("overtime", ""),
+                # data.get("overtime", ""),
                 data.get("comment", "")
             ])
             update.message.reply_text("✅ Сохранено.")
