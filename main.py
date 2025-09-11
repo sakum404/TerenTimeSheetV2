@@ -18,6 +18,10 @@ from cachetools import TTLCache
 import time
 import requests
 
+from telegram import ReplyKeyboardRemove
+from itertools import zip_longest
+from decimal import Decimal, InvalidOperation
+
 #NOTORIGIN2
 # --- Настройки из переменных окружения ---
 try:
@@ -369,6 +373,102 @@ def get_user_bitrix_id(username: str) -> int | None:
         return None
 
 
+def _unique_periods_from_projects_sheet() -> list[str]:
+    """
+    Возвращает отсортированный список уникальных period из листа projects_sheet.
+    Читает колонку с заголовком 'period'.
+    """
+    try:
+        rows = project_sheet.get_all_records()  # [{ 'period': 'Сентябрь неделя 1', ...}, ...]
+        periods = []
+        seen = set()
+        for r in rows:
+            p = str(r.get("period", "")).strip()
+            if p and p not in seen:
+                seen.add(p)
+                periods.append(p)
+        # Порядок: как встретились, либо можно сортировать
+        return periods  # или return sorted(periods)
+    except Exception as e:
+        logger.error(f"Не удалось получить периоды из projects_sheet: {e}")
+        return []
+
+
+def _rows_for_user_and_period(period: str, tg_username: str, tg_fullname: str | None = None) -> list[dict]:
+    """
+    Выбирает строки из листа WebAppData (log_sheet), где Telegram ID совпадает с username (или Full Name)
+    и Период == period. Возвращает список dict.
+    """
+    try:
+        records = log_sheet.get_all_records()  # русские заголовки
+    except Exception as e:
+        logger.error(f"Ошибка чтения WebAppData: {e}")
+        return []
+
+    uname = (tg_username or "").lstrip("@").strip()
+    fname = (tg_fullname or "").strip()
+
+    result = []
+    for r in records:
+        rid = str(r.get("Telegram ID", "")).lstrip("@").strip()
+        rperiod = str(r.get("Период", "")).strip()
+        # В записи при сохранении вы писали user = username or full_name,
+        # поэтому фильтруем по username ИЛИ по полному имени
+        if rperiod == period and (rid == uname or (fname and rid == fname)):
+            result.append(r)
+    return result
+
+
+def _safe_to_decimal(val) -> Decimal:
+    try:
+        return Decimal(str(val).replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _format_report(rows: list[dict]) -> str:
+    """
+    Формирует текстовый отчёт по строкам WebAppData.
+    Подсчитывает суммарное 'Потрачанное время'.
+    """
+    if not rows:
+        return "Данных за выбранный период не найдено."
+
+    lines = []
+    total_time = Decimal("0")
+
+    # Ключи на русском из вашей таблицы
+    K_PROJ = "Проект"
+    K_SUBPROJ = "Подпроект"
+    K_TASKS = "Задачи"
+    K_WORKTYPE = "Вид работы"
+    K_TIMEFRAME = "Временные рамки"
+    K_LEVEL = "Уровень сложности"
+    K_SPENT = "Потрачанное время"
+    K_OVERTIME = "Переработки"
+    K_COMMENT = "Переработки"  # по вашему примеру комментарий записывается в последний столбец (семинар...),
+                               # но в заголовках это поле называется «Переработки».
+                               # Если у вас отдельный столбец Комментарий — замените ключ здесь.
+
+    for i, r in enumerate(rows, 1):
+        spent = _safe_to_decimal(r.get(K_SPENT, "0"))
+        total_time += spent
+
+        part = [
+            f"{i}) {r.get(K_PROJ, '')} › {r.get(K_SUBPROJ, '')} › {r.get(K_TASKS, '')}",
+            f"   Вид работы: {r.get(K_WORKTYPE, '')}",
+            f"   Временные рамки: {r.get(K_TIMEFRAME, '')} | Сложность: {r.get(K_LEVEL, '')}",
+            f"   Потраченное время: {r.get(K_SPENT, '')}",
+        ]
+        # Если хотите выводить комментарий — раскомментируйте и поправьте ключ, если нужен другой:
+        if r.get(K_COMMENT):
+            part.append(f"   Комментарий: {r.get(K_COMMENT)}")
+
+        lines.append("\n".join(part))
+
+    lines.append("\nИТОГО по периоду: " + str(total_time))
+    return "\n".join(lines)
+
 @app.get("/ping")
 async def ping():
     return PlainTextResponse("pong")
@@ -680,6 +780,68 @@ async def tasks(
 ASK_PASSWORD = 1
 authorized_users = set()
 
+def report_entry(update: Update, context: CallbackContext):
+    """Показывает клавиатуру с периодами из projects_sheet"""
+    # Проверка доступа
+    username = update.message.from_user.username or ""
+    if not is_user_allowed(username):
+        update.message.reply_text("❌ У вас нет доступа к этому боту.", reply_markup=ReplyKeyboardRemove())
+        return
+
+    periods = _unique_periods_from_projects_sheet()
+    if not periods:
+        update.message.reply_text("Периоды не найдены.", reply_markup=ReplyKeyboardRemove())
+        return
+
+    # Сохраняем список периодов в user_data, чтобы потом валидировать выбор
+    context.user_data["periods_list"] = periods
+    context.user_data["awaiting_period"] = True
+
+    # Разобьём кнопки по 2-3 в ряд для удобства
+    row_size = 2
+    rows = []
+    it = iter(periods)
+    for a, b in zip_longest(it, it, fillvalue=None):
+        row = [p for p in (a, b) if p]
+        rows.append(row)
+
+    rows.append(["🔙 Отмена"])
+    markup = ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
+    update.message.reply_text("Выберите период:", reply_markup=markup)
+
+
+def report_select_period(update: Update, context: CallbackContext):
+    """Обрабатывает выбор периода и отправляет отчёт"""
+    text = (update.message.text or "").strip()
+    if not context.user_data.get("awaiting_period"):
+        return  # не в режиме выбора периода — пропускаем
+
+    # Отмена
+    if text == "🔙 Отмена":
+        context.user_data["awaiting_period"] = False
+        update.message.reply_text("Отменено.", reply_markup=ReplyKeyboardRemove())
+        # Вернём основную клавиатуру с двумя кнопками
+        return send_webapp_button(update)
+
+    periods = context.user_data.get("periods_list", [])
+    if text not in periods:
+        update.message.reply_text("Пожалуйста, выберите период из списка или нажмите «Отмена».")
+        return
+
+    # Фильтрация строк по username + period
+    tg_username = update.message.from_user.username or ""
+    tg_fullname = update.message.from_user.full_name or ""
+    rows = _rows_for_user_and_period(period=text, tg_username=tg_username, tg_fullname=tg_fullname)
+
+    report_text = _format_report(rows)
+    # Скрываем выбор периодов
+    update.message.reply_text(report_text, reply_markup=ReplyKeyboardRemove())
+
+    # Выключаем режим ожидания периода
+    context.user_data["awaiting_period"] = False
+
+    # Вернём основную клавиатуру
+    return send_webapp_button(update)
 
 def start(update: Update, context: CallbackContext) -> int:
     user_id = update.message.from_user.id
@@ -711,9 +873,12 @@ def send_webapp_button(update: Update) -> int:
     username = update.message.from_user.username or ""
     webapp_url = f"{FORM_URL}?username={username}"
 
-    button = [[KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=webapp_url))]]
-    markup = ReplyKeyboardMarkup(button, resize_keyboard=True)
-    update.message.reply_text("Нажмите, чтобы заполнить форму:", reply_markup=markup)
+    fill_btn = KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=webapp_url))
+    report_btn = KeyboardButton("📊 Отчет")
+
+    # Две кнопки в одном ряду
+    markup = ReplyKeyboardMarkup([[fill_btn, report_btn]], resize_keyboard=True)
+    update.message.reply_text("Выберите действие:", reply_markup=markup)
     return ConversationHandler.END
 
 def receive_webapp(update: Update, context: CallbackContext):
@@ -753,9 +918,17 @@ def run_telegram():
         fallbacks=[]
     )
     dp.add_handler(conv_handler)
+
+    # При нажатии кнопки "📊 Отчет" — показать периоды
+    dp.add_handler(MessageHandler(Filters.text & Filters.regex(r"^📊 Отчет$"), report_entry))
+
+    # Любой текст, когда ждём период — попытка выбрать период или отмена
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, report_select_period))
+
     dp.add_handler(MessageHandler(Filters.status_update.web_app_data, receive_webapp))
     updater.start_polling()
     updater.idle()
+
 
 
 # --- Запуск в отдельном потоке ---
