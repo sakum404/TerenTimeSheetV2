@@ -32,6 +32,7 @@ try:
     BITRIX_WEBHOOK = os.environ.get("BITRIX_WEBHOOK")
     BITRIX_PROJECT_ID = os.environ.get("BITRIX_PROJECT_ID", "")
     BITRIX_PROJECT_ID = [int(x.strip()) for x in BITRIX_PROJECT_ID.split(",") if x.strip()]
+    REPORT_URL = os.environ.get("REPORT_URL", FORM_URL)  # <-- НОВОЕ
 except KeyError as e:
     raise RuntimeError(f"Не задана переменная окружения: {e}")
 
@@ -705,6 +706,57 @@ async def serve_form_data(username: str = Query(None)):
             status_code=500
         )
 
+@app.get("/report.html")
+async def serve_report():
+    return FileResponse("static/report.html")
+
+def _norm(s: str | None) -> str:
+    return (s or "").strip().lstrip("@").lower()
+
+@app.get("/report-data")
+async def report_data(username: str = Query(None)):
+    """
+    Возвращает строки из WebAppData, где колонка пользователя = username (без @).
+    Ищем колонку пользователя по нескольким вариантам написания, включая 'Telegram id'.
+    """
+    if not username:
+        return JSONResponse({"rows": []})
+
+    try:
+        records = log_sheet.get_all_records()  # читает с учётом заголовков первой строки
+    except Exception as e:
+        logger.error(f"Ошибка чтения WebAppData: {e}")
+        return JSONResponse({"rows": []})
+
+    if not records:
+        return JSONResponse({"rows": []})
+
+    # 1) Определяем реальный ключ колонки пользователя (case-insensitive)
+    first_row_keys = list(records[0].keys())
+    lower_map = {k.strip().lower(): k for k in first_row_keys}
+    # поддерживаем разные варианты, в т.ч. 'Telegram id'
+    for candidate in ("telegram id", "telegramid", "telegram", "username", "user", "пользователь", "автор"):
+        if candidate in lower_map:
+            user_key = lower_map[candidate]
+            break
+    else:
+        # на крайний случай — если ничего не нашли, пытаемся напрямую 'Telegram id'
+        user_key = "Telegram id" if "Telegram id" in first_row_keys else first_row_keys[0]
+
+    u = _norm(username)
+
+    # 2) Фильтруем строки
+    filtered = []
+    for r in records:
+        cell = _norm(str(r.get(user_key, "")))
+        if cell == u:
+            filtered.append(r)
+
+    # опционально можно отсортировать — закомментировано:
+    # if filtered and "Период" in filtered[0]:
+    #     filtered.sort(key=lambda x: str(x.get("Период","")), reverse=True)
+
+    return JSONResponse({"rows": filtered})
 
 
 
@@ -869,14 +921,14 @@ def check_password(update: Update, context: CallbackContext) -> int:
     return ASK_PASSWORD
 
 
-def send_webapp_button(update: Update) -> int:
+def send_webapp_button(update: Update, context: CallbackContext = None) -> int:
     username = update.message.from_user.username or ""
-    webapp_url = f"{FORM_URL}?username={username}"
+    fill_url = f"{FORM_URL}?username={username}"
+    report_url = f"{REPORT_URL}?username={username}"
 
-    fill_btn = KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=webapp_url))
-    report_btn = KeyboardButton("📊 Отчет")
+    fill_btn = KeyboardButton("📝 Заполнить", web_app=WebAppInfo(url=fill_url))
+    report_btn = KeyboardButton("📊 Отчет", web_app=WebAppInfo(url=report_url))
 
-    # Две кнопки в одном ряду
     markup = ReplyKeyboardMarkup([[fill_btn, report_btn]], resize_keyboard=True)
     update.message.reply_text("Выберите действие:", reply_markup=markup)
     return ConversationHandler.END
