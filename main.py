@@ -21,6 +21,12 @@ import requests
 from telegram import ReplyKeyboardRemove
 from itertools import zip_longest
 from decimal import Decimal, InvalidOperation
+from typing import Dict, Any, List
+
+from io import BytesIO
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from datetime import datetime
 
 #NOTORIGIN2
 # --- Настройки из переменных окружения ---
@@ -713,6 +719,18 @@ async def serve_report():
 def _norm(s: str | None) -> str:
     return (s or "").strip().lstrip("@").lower()
 
+EXCLUDE_COL_SUBSTR = ["себестоим"]  # хватит под все варианты: "Себестоимость", "себестоимость, тг" и т.п.
+
+def _should_exclude_col(col_name: str) -> bool:
+    n = (col_name or "").strip().lower()
+    return any(sub in n for sub in EXCLUDE_COL_SUBSTR)
+
+def _strip_excluded_columns(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for r in records:
+        out.append({k: v for k, v in r.items() if not _should_exclude_col(k)})
+    return out
+
 @app.get("/report-data")
 async def report_data(username: str = Query(None)):
     """
@@ -752,13 +770,87 @@ async def report_data(username: str = Query(None)):
         if cell == u:
             filtered.append(r)
 
-    # опционально можно отсортировать — закомментировано:
-    # if filtered and "Период" in filtered[0]:
-    #     filtered.sort(key=lambda x: str(x.get("Период","")), reverse=True)
+    filtered = [r for r in records if _norm(str(r.get(user_key, ""))) == u]
+
+    # УДАЛЯЕМ "Себестоимость" и похожие
+    filtered = _strip_excluded_columns(filtered)
 
     return JSONResponse({"rows": filtered})
 
 
+@app.get("/report-export-xlsx")
+async def report_export_xlsx(username: str = Query(...)):
+    """
+    Генерирует XLSX со строками пользователя из WebAppData.
+    Колонка 'Себестоимость' и подобные — исключены.
+    """
+    if not username:
+        return JSONResponse({"error": "username is required"}, status_code=400)
+
+    # --- берём те же записи, что и в /report-data ---
+    try:
+        records = log_sheet.get_all_records()
+    except Exception as e:
+        logger.error(f"Ошибка чтения WebAppData: {e}")
+        return JSONResponse({"error": "sheet read error"}, status_code=500)
+
+    if not records:
+        # пустая книга без данных
+        wb = Workbook(); ws = wb.active; ws.title = "Мои записи"
+        bio = BytesIO(); wb.save(bio); bio.seek(0)
+        return StreamingResponse(
+            bio,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=report_{username}.xlsx"}
+        )
+
+    # находим колонку пользователя
+    first_row_keys = list(records[0].keys())
+    lower_map = {k.strip().lower(): k for k in first_row_keys}
+    for candidate in ("telegram id", "telegramid", "telegram", "username", "user", "пользователь", "автор"):
+        if candidate in lower_map:
+            user_key = lower_map[candidate]
+            break
+    else:
+        user_key = "Telegram id" if "Telegram id" in first_row_keys else first_row_keys[0]
+
+    u = (username or "").strip().lstrip("@").lower()
+    filtered = [r for r in records if (str(r.get(user_key, "")).strip().lstrip("@").lower() == u)]
+
+    # вырезаем "Себестоимость" и т.п.
+    filtered = _strip_excluded_columns(filtered)
+
+    # если пусто — всё равно сгенерируем книгу с заголовком без строк
+    # определяем заголовки
+    headers = list(filtered[0].keys()) if filtered else [k for k in first_row_keys if not _should_exclude_col(k)]
+
+    # --- пишем в xlsx ---
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Мои записи"
+
+    # Заголовки
+    ws.append(headers)
+
+    # Данные
+    for row in filtered:
+        ws.append([row.get(h, "") for h in headers])
+
+    # Авто-ширина (простая эвристика)
+    for i, col_name in enumerate(headers, start=1):
+        max_len = max([len(str(col_name))] + [len(str(r.get(col_name, ""))) for r in filtered]) if filtered else len(str(col_name))
+        ws.column_dimensions[chr(64+i) if i <= 26 else None].width = min(max_len + 2, 60)  # простое ограничение
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+
+    fname = f"report_{u}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        bio,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+    )
 
 @app.get("/subprojects")
 async def subprojects(project_id: int, username: str = Query(None)):
