@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>TerenTimeSheetV2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Telegram WebApp -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Select2 -->
+  <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* Hours stepper */
+    .hours-control {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--primary-light);
+      border-radius: 12px;
+      padding: 0.5rem;
+      box-shadow: var(--shadow);
+      transition: box-shadow .2s ease, background .2s ease;
+    }
+
+    .hours-control:focus-within {
+      background: #e8f1f7; /* мягкий подсвет */
+      box-shadow: var(--shadow-hover);
+    }
+
+    .hours-btn {
+      width: 42px;
+      height: 42px;
+      border: none;
+      border-radius: 10px;
+      background: var(--background);
+      box-shadow: var(--shadow);
+      color: var(--primary);
+      font-size: 1.25rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform .08s ease, box-shadow .2s ease, background .2s ease, color .2s ease;
+    }
+
+    .hours-btn:hover {
+      box-shadow: var(--shadow-hover);
+      background: #eef4f8;
+    }
+
+    .hours-btn:active {
+      transform: translateY(1px) scale(0.98);
+    }
+
+    .hours-input {
+      flex: 1;
+      text-align: center;
+      padding: 0.5rem 0.75rem;
+      border: none;
+      background: transparent;
+      font-size: 1rem;
+      color: var(--text-primary);
+      outline: none;
+    }
+
+    .hours-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .hours-hint {
+      margin-top: 0.35rem;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+
+    /* Стили для обязательных полей */
+    .required-field label::after {
+      content: " *";
+      color: #e53935;
+    }
+
+    .error-message {
+      color: #e53935;
+      font-size: 0.75rem;
+      margin-top: 0.25rem;
+      display: none;
+    }
+
+    .input-error {
+      border-color: #e53935 !important;
+      box-shadow: 0 0 0 2px rgba(229, 57, 53, 0.2) !important;
+    }
+  </style>
+</head>
+<body>
+  <!-- Loading overlay -->
+  <div id="pageLoader" class="page-loader">
+    <div class="spinner"></div>
+  </div>
+
+  <div class="container">
+    <div class="header">
+      <div>
+        <img src="imgs/sana4.png" style="width: 50%;" alt="">
+      </div>
+    </div>
+
+    <pre id="debug" style="display: none;"></pre>
+
+    <!-- Project Information -->
+    <div class="form-section">
+      <div class="form-group required-field">
+        <label for="projects">Проект</label>
+        <div class="input-wrapper">
+          <select id="projects" required>
+            <option value="">Выберите проект</option>
+          </select>
+          <div class="error-message" id="projects-error">Пожалуйста, выберите проект</div>
+        </div>
+      </div>
+
+      <div class="form-group required-field">
+        <label for="subproject">Подпроект</label>
+        <div class="input-wrapper">
+          <select id="subproject" required>
+            <option value="">Выберите подпроект</option>
+          </select>
+          <div class="error-message" id="subproject-error">Пожалуйста, выберите подпроект</div>
+        </div>
+      </div>
+
+      <div class="form-group required-field">
+        <label for="subtask">Задачи</label>
+        <div class="input-wrapper">
+          <select id="subtask" required>
+            <option value="">Выберите задачу</option>
+          </select>
+          <div class="error-message" id="subtask-error">Пожалуйста, выберите задачу</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Period and Team -->
+    <div class="form-section">
+      <div class="form-group required-field">
+        <label for="period">Период</label>
+        <div class="input-wrapper">
+          <select id="period" class="select2" required>
+            <option value="">Выберите период</option>
+          </select>
+          <div class="error-message" id="period-error">Пожалуйста, выберите период</div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="team">Команда</label>
+        <div class="input-wrapper">
+          <input type="text" id="team" readonly placeholder="Команда будет указана автоматически" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="executor">Исполнитель</label>
+        <div class="input-wrapper">
+          <input type="text" id="executor" readonly placeholder="Исполнитель будет указан автоматически" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="position">Позиция</label>
+        <div class="input-wrapper">
+          <input type="text" id="position" readonly placeholder="Позиция будет указана автоматически" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Work Details -->
+    <div class="form-section">
+      <div class="form-group required-field">
+        <label for="task">Вид работы</label>
+        <div class="input-wrapper">
+          <select id="task" class="select2" required>
+            <option value="">Выберите вид работы</option>
+          </select>
+          <div class="error-message" id="task-error">Пожалуйста, выберите вид работы</div>
+        </div>
+      </div>
+
+      <div class="form-group required-field">
+        <label for="time_frame">Временные рамки</label>
+        <div class="input-wrapper">
+          <select id="time_frame" required>
+            <option value="">Выберите временные рамки</option>
+          </select>
+          <div class="error-message" id="time_frame-error">Пожалуйста, выберите временные рамки</div>
+        </div>
+      </div>
+
+      <div class="form-group required-field">
+        <label for="difficulty_level">Уровень сложности</label>
+        <div class="input-wrapper">
+          <select id="difficulty_level" required>
+            <option value="">Выберите уровень сложности</option>
+          </select>
+          <div class="error-message" id="difficulty_level-error">Пожалуйста, выберите уровень сложности</div>
+        </div>
+      </div>
+
+      <div class="form-group required-field">
+        <label for="time">Затраченное время</label>
+        <div class="input-wrapper">
+          <div class="hours-control" data-step="0.5" data-min="0" data-max="20">
+            <button type="button" class="hours-btn" aria-label="Уменьшить" data-dir="-1">−</button>
+            <input id="time" name="time" type="number" inputmode="decimal"
+                   min="0" max="20" step="0.5" value=""
+                   class="hours-input" placeholder="Например, 2.5" required>
+            <button type="button" class="hours-btn" aria-label="Увеличить" data-dir="1">+</button>
+          </div>
+          <div class="error-message" id="time-error">Пожалуйста, укажите затраченное время</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comments -->
+    <div class="form-section">
+      <div class="form-group">
+        <label for="comment">Комментарий</label>
+        <div class="input-wrapper">
+          <textarea id="comment" rows="3" placeholder="Дополнительная информация о выполненной работе..."></textarea>
+        </div>
+      </div>
+    </div>
+
+    <div class="submit-section">
+      <button id="submitBtn" class="submit-btn">Отправить данные</button>
+    </div>
+  </div>
+  <script src="app.js"></script>
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+  <script>
+    (function () {
+      const wrap = document.querySelector('.hours-control');
+      if (!wrap) return;
+
+      const input = document.getElementById('time');
+
+      const step = parseFloat(wrap.dataset.step || input.step || 0.5);
+      const min  = parseFloat(wrap.dataset.min  || input.min  || 0);
+      const max  = parseFloat(wrap.dataset.max  || input.max  || 20);
+
+      function decimalsCount(n) {
+        const s = String(n);
+        return (s.split('.')[1] || '').length;
+      }
+      const fixed = decimalsCount(step);
+
+      function toNumber(v) {
+        if (typeof v === 'string') v = v.replace(',', '.');
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? n : 0;
+      }
+
+      function clampRound(val) {
+        const s = step || 1;
+        let v = Number.isFinite(val) ? val : 0;
+        v = Math.round(v / s) * s;      // к ближайшему шагу
+        v = Math.min(max, Math.max(min, v)); // в диапазон
+        return Number(v.toFixed(fixed));
+      }
+
+      wrap.addEventListener('click', (e) => {
+        const btn = e.target.closest('.hours-btn');
+        if (!btn) return;
+        const dir = parseFloat(btn.dataset.dir || '0'); // -1 или 1
+        const current = toNumber(input.value || '0');
+        const next = clampRound(current + dir * step);
+        input.value = next.toFixed(fixed);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+
+      input.addEventListener('blur', () => {
+        if (input.value === '') return;
+        input.value = clampRound(toNumber(input.value)).toFixed(fixed);
+      });
+    })();
+
+    // Валидация формы
+    document.addEventListener('DOMContentLoaded', function() {
+      const form = document.querySelector('.container');
+      const submitBtn = document.getElementById('submitBtn');
+      const requiredFields = document.querySelectorAll('[required]');
+
+      // Функция для проверки валидности поля
+      function validateField(field) {
+        const errorElement = document.getElementById(field.id + '-error');
+        let isValid = true;
+        
+        // Для селектов проверяем, что выбрано не пустое значение
+        if (field.tagName === 'SELECT') {
+          if (!field.value || field.value === '') {
+            isValid = false;
+          }
+        } 
+        // Для input проверяем, что значение не пустое
+        else if (field.tagName === 'INPUT' || field.tagName === 'TEXTAREA') {
+          if (!field.value.trim()) {
+            isValid = false;
+          }
+        }
+
+        if (!isValid) {
+          field.classList.add('input-error');
+          if (errorElement) errorElement.style.display = 'block';
+          return false;
+        } else {
+          field.classList.remove('input-error');
+          if (errorElement) errorElement.style.display = 'none';
+          return true;
+        }
+      }
+
+      // Проверка всех полей при отправке
+      submitBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        
+        let isValid = true;
+        
+        requiredFields.forEach(field => {
+          if (!validateField(field)) {
+            isValid = false;
+          }
+        });
+
+        if (isValid) {
+          // Если все поля валидны, можно отправить форму
+          // Здесь добавьте код для отправки данных
+        } else {
+          // Прокрутка к первому невалидному полю
+          const firstInvalidField = document.querySelector('.input-error');
+          if (firstInvalidField) {
+            firstInvalidField.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }
+      });
+
+      // Валидация при изменении поля
+      requiredFields.forEach(field => {
+        field.addEventListener('change', function() {
+          validateField(this);
+        });
+        
+        field.addEventListener('input', function() {
+          if (this.tagName === 'SELECT') {
+            if (this.value && this.value !== '') {
+              this.classList.remove('input-error');
+              const errorElement = document.getElementById(this.id + '-error');
+              if (errorElement) errorElement.style.display = 'none';
+            }
+          } else {
+            if (this.value.trim()) {
+              this.classList.remove('input-error');
+              const errorElement = document.getElementById(this.id + '-error');
+              if (errorElement) errorElement.style.display = 'none';
+            }
+          }
+        });
+      });
+    });
+  </script>
+</body>
+</html>

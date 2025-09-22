@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Мои записи</title>
+  <style>
+    :root{
+      --bg:#f6f7fb; --fg:#111; --muted:#667085; --line:#eef1f6; --line2:#f0f2f7; --card:#fff;
+      --shadow:0 6px 18px rgba(0,0,0,.06);
+    }
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+    .wrap{max-width:960px;margin:0 auto;padding:12px}
+    h1{font-size:18px;margin:6px 0 10px}
+    .card{background:var(--card);border-radius:14px;box-shadow:var(--shadow);padding:12px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+    input[type="search"]{flex:1;min-width:180px;padding:9px;border-radius:10px;border:1px solid #e4e7ee;font-size:14px}
+    button{padding:9px 12px;border-radius:10px;border:1px solid #e4e7ee;background:#fff;cursor:pointer;font-size:14px}
+    .table-scroller{overflow:auto;-webkit-overflow-scrolling:touch;border-radius:12px;border:1px solid var(--line)}
+    table{width:100%;border-collapse:separate;border-spacing:0;min-width:620px}
+    thead th{position:sticky;top:0;background:#fff;padding:10px;border-bottom:1px solid var(--line);text-align:left;font-weight:600;font-size:13px;white-space:nowrap}
+    tbody td{padding:10px;border-bottom:1px solid var(--line2);font-size:13px;vertical-align:top;word-break:break-word}
+    tbody tr{cursor:pointer}
+    tbody tr:hover{background:#fafbff}
+    .empty{padding:24px;text-align:center;color:var(--muted)}
+
+    /* Модалка */
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;padding:12px;z-index:1000}
+    .modal{background:#fff;border-radius:16px;max-width:720px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.25);overflow:hidden}
+    .modal-header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--line)}
+    .modal-title{font-weight:600}
+    .modal-close{border:0;background:transparent;font-size:20px;cursor:pointer;line-height:1;padding:6px 8px}
+    .modal-body{padding:12px 14px}
+    .kv{display:grid;grid-template-columns:180px 1fr;gap:8px 12px}
+    .kv dt{color:var(--muted);font-size:12px}
+    .kv dd{margin:0;font-size:13px}
+
+    @media (max-width:720px){
+      .wrap{padding:8px}
+      .card{padding:10px}
+      input[type="search"], button{font-size:13px;padding:8px 10px}
+      thead th, tbody td{padding:8px;font-size:12.5px}
+      table{min-width:560px}
+      .kv{grid-template-columns:130px 1fr}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Записи — <span id="executorName"></span></h1>
+  <div class="card">
+    <div class="controls">
+      <input id="q" type="search" placeholder="Поиск по проекту, подпроекту, задаче, периоду, комментарию…">
+      <button id="export">Экспорт XLSX</button>
+    </div>
+
+    <div class="table-scroller">
+      <table id="tbl">
+        <thead>
+          <tr>
+            <th>Проект</th>
+            <th>Подпроект</th>
+            <th>Задачи</th>
+            <th>Период</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="empty" class="empty" style="display:none">Пока нет записей.</div>
+  </div>
+</div>
+
+<!-- Модалка -->
+<div class="modal-backdrop" id="modalBack">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-header">
+      <div class="modal-title" id="modalTitle">Запись</div>
+      <button class="modal-close" id="modalClose" aria-label="Закрыть">×</button>
+    </div>
+    <div class="modal-body">
+      <dl class="kv" id="modalKV"></dl>
+    </div>
+  </div>
+</div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const username = params.get('username') || '';
+
+  // если API на другом домене — укажите полную базу (иначе оставьте пусто)
+  //const API_BASE = 'https://sanatimesheet-sanatimesheet.up.railway.app';
+  const API_BASE = 'https://terentimesheetv2-terentimesheetv2.up.railway.app';
+  const tbody = document.getElementById('tbody');
+  const empty = document.getElementById('empty');
+  const search = document.getElementById('q');
+  const exportBtn = document.getElementById('export');
+
+  const modalBack = document.getElementById('modalBack');
+  const modalClose = document.getElementById('modalClose');
+  const modalKV = document.getElementById('modalKV');
+  const modalTitle = document.getElementById('modalTitle');
+
+  let rows = [];
+  let headers = [];
+  
+   function findKey(keys, candidates){
+	  const map = {};
+	  keys.forEach(k => map[k.trim().toLowerCase()] = k);
+	  for (const c of candidates){
+		const hit = map[c.toLowerCase()];
+		if (hit) return hit;
+	  }
+	  return null;
+	}
+  // мягкое сопоставление названий колонок
+  function findKey(keys, candidates){
+    const map = {};
+    keys.forEach(k => map[k.trim().toLowerCase()] = k);
+    for (const c of candidates){
+      const hit = map[c.toLowerCase()];
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  // наши 4 колонки для главной таблицы
+  function pickMainColumns(keys){
+    const projKey = findKey(keys, ['Проект','projects','project']);
+    const subprojKey = findKey(keys, ['Подпроект','subproject','subprojects']);
+    const taskKey = findKey(keys, ['Задачи','subtasks','task','tasks']);
+    const periodKey = findKey(keys, ['Период','period']);
+    return { projKey, subprojKey, taskKey, periodKey };
+  }
+
+  async function loadData(){
+	  try{
+		const url = `${API_BASE}/report-data?username=${encodeURIComponent(username)}`;
+		const res = await fetch(url);
+		const text = await res.text();
+		const data = JSON.parse(text);
+
+		rows = data.rows || [];
+		if (!rows.length){ showEmpty('Пока нет записей.'); return; }
+		headers = Object.keys(rows[0]);
+
+		// Показать имя исполнителя
+		const executorKey = findKey(headers, ['Исполнитель','executor']);
+		if (executorKey) {
+		  const executorName = rows[0][executorKey] || '';
+		  document.getElementById('executorName').textContent = executorName;
+		}
+
+		renderTable(rows);
+	  }catch(e){
+		console.error(e);
+		showEmpty('Ошибка загрузки данных.');
+	  }
+	}
+
+
+  function showEmpty(msg){
+    document.getElementById('tbl').style.display = 'none';
+    empty.style.display = 'block';
+    empty.textContent = msg;
+  }
+
+  function renderTable(data){
+    const { projKey, subprojKey, taskKey, periodKey } = pickMainColumns(headers);
+    tbody.innerHTML = '';
+
+    data.forEach((r, idx) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${safe(r[projKey])}</td>
+        <td>${safe(r[subprojKey])}</td>
+        <td>${safe(r[taskKey])}</td>
+        <td>${safe(r[periodKey])}</td>
+      `;
+      tr.addEventListener('click', () => openModal(r, {projKey, subprojKey, taskKey}));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function safe(v){ return (v === undefined || v === null) ? '' : String(v); }
+
+  function openModal(record, mainKeys){
+    // заголовок модалки — Проект › Подпроект › Задачи (если есть)
+    const t1 = safe(record[mainKeys.projKey] || '');
+    const t2 = safe(record[mainKeys.subprojKey] || '');
+    const t3 = safe(record[mainKeys.taskKey] || '');
+    modalTitle.textContent = [t1,t2,t3].filter(Boolean).join(' › ') || 'Запись';
+
+    // все поля — аккуратно в виде ключ: значение
+    modalKV.innerHTML = '';
+    headers.forEach(h => {
+      const val = record[h];
+      if (val === undefined || val === null || String(val).trim() === '') return;
+      const dt = document.createElement('dt'); dt.textContent = h;
+      const dd = document.createElement('dd'); dd.textContent = val;
+      modalKV.append(dt, dd);
+    });
+
+    modalBack.style.display = 'flex';
+  }
+
+  function closeModal(){
+    modalBack.style.display = 'none';
+  }
+
+  function filterRows(){
+    const q = (search.value || '').toLowerCase();
+    const filtered = !q ? rows : rows.filter(r =>
+      headers.some(h => String(r[h] ?? '').toLowerCase().includes(q))
+    );
+    renderTable(filtered);
+  }
+
+  function exportXLSX(){
+  const url = `${API_BASE}/report-export-xlsx?username=${encodeURIComponent(username)}`;
+  // Просто открываем URL — браузер/вебвью скачает файл
+	  window.location.href = url;
+	}
+
+	exportBtn.addEventListener('click', exportXLSX);
+
+  // события
+  search.addEventListener('input', filterRows);
+  modalClose.addEventListener('click', closeModal);
+  modalBack.addEventListener('click', (e)=>{ if(e.target === modalBack) closeModal(); });
+  window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') closeModal(); });
+
+  loadData();
+</script>
+</body>
+</html>
