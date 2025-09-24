@@ -28,6 +28,9 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from datetime import datetime
 
+from datetime import time as dtime
+import pytz
+
 #NOTORIGIN2
 # --- Настройки из переменных окружения ---
 try:
@@ -82,6 +85,75 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Helpers for user_data auth tracking ---
+
+def weekly_friday_broadcast(context: CallbackContext):
+    """
+    Каждую пятницу шлём только тем, у кого authorized=Y и задан telegram_chat_id в user_data.
+    """
+    text = "Напоминание: не забудьте заполнить тайм-шит 😊"
+    chat_ids = get_authorized_chat_ids()  # читаем актуально из таблицы на каждый запуск задания
+    logger.info(f"Пятничная рассылка: {len(chat_ids)} получателей")
+    for cid in chat_ids:
+        try:
+            context.bot.send_message(chat_id=cid, text=text)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить сообщение в чат {cid}: {e}")
+
+
+def _norm_uname(u: str | None) -> str:
+    return (u or "").strip().lstrip("@").lower()
+
+def set_user_authorized(username: str, chat_id: int) -> None:
+    """
+    Помечает пользователя как авторизованного и записывает его chat_id в user_data.
+    Требуются столбцы: 'telegram_username', 'authorized', 'telegram_chat_id'
+    """
+    try:
+        rows = user_sheet.get_all_records()
+        uname = _norm_uname(username)
+        header = user_sheet.row_values(1)
+        # индексы для апдейта (1-based)
+        col_map = {name.strip().lower(): i+1 for i, name in enumerate(header)}
+        need_cols = ["telegram_username", "authorized", "telegram_chat_id"]
+        for c in need_cols:
+            if c not in col_map:
+                raise RuntimeError(f"В листе user_data отсутствует столбец '{c}'")
+
+        target_row = None
+        for idx, row in enumerate(rows, start=2):  # данные начинаются со 2-й строки
+            sheet_uname = _norm_uname(row.get("telegram_username"))
+            if sheet_uname == uname:
+                target_row = idx
+                break
+
+        if target_row is None:
+            raise RuntimeError(f"Пользователь @{username} не найден в user_data")
+
+        user_sheet.update_cell(target_row, col_map["authorized"], "Y")
+        user_sheet.update_cell(target_row, col_map["telegram_chat_id"], str(chat_id))
+    except Exception as e:
+        logger.error(f"Не удалось сохранить авторизацию @{username}: {e}")
+
+def get_authorized_chat_ids() -> list[int]:
+    """
+    Возвращает список chat_id всех авторизованных пользователей (authorized in ['Y','TRUE','1'])
+    с непустым telegram_chat_id.
+    """
+    try:
+        rows = user_sheet.get_all_records()
+        chat_ids: list[int] = []
+        for r in rows:
+            auth = str(r.get("authorized", "")).strip().upper()
+            chat = str(r.get("telegram_chat_id", "")).strip()
+            if auth in {"Y", "YES", "TRUE", "1"} and chat.isdigit():
+                chat_ids.append(int(chat))
+        return chat_ids
+    except Exception as e:
+        logger.error(f"Ошибка чтения авторизованных chat_id: {e}")
+        return []
+
 
 def get_all_project_tasks(project_id: int):
     """Возвращает ВСЕ задачи проекта (включая подзадачи) одним большим запросом"""
@@ -1007,10 +1079,21 @@ def start(update: Update, context: CallbackContext) -> int:
 def check_password(update: Update, context: CallbackContext) -> int:
     if update.message.text.strip() == ALLOWED_PASSWORD:
         authorized_users.add(update.message.from_user.id)
+
+        # NEW: фиксируем авторизацию и chat_id в user_data
+        username = update.message.from_user.username or ""
+        chat_id = update.effective_chat.id
+        if username:
+            set_user_authorized(username, chat_id)
+        else:
+            logger.warning(f"У пользователя без username (id={update.message.from_user.id}) "
+                           f"не записан chat_id в user_data")
+
         update.message.reply_text("✅ Доступ разрешён.")
         return send_webapp_button(update)
     update.message.reply_text("❌ Неверный пароль. Попробуйте снова.")
     return ASK_PASSWORD
+
 
 
 def send_webapp_button(update: Update, context: CallbackContext = None) -> int:
@@ -1070,6 +1153,17 @@ def run_telegram():
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, report_select_period))
 
     dp.add_handler(MessageHandler(Filters.status_update.web_app_data, receive_webapp))
+
+    jq = updater.job_queue
+    tz = pytz.timezone("Asia/Almaty")
+    jq.run_daily(
+        weekly_friday_broadcast,
+        time=dtime(hour=10, minute=0, tzinfo=tz),  # время по Asia/Almaty
+        days=(4,),  # 0=Пн ... 4=Пт
+        name="weekly_friday_broadcast",
+    )
+
+
     updater.start_polling()
     updater.idle()
 
