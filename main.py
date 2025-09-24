@@ -111,7 +111,7 @@ def weekly_monday_broadcast(context: CallbackContext):
     """
     text = (
         "⚡️Важно!\n"
-        "⚠️Не забудьте проверить и заполнить таймшит за прошедшую неделю.\n"
+        "⚠️Не забудьте проверить и заполнить таймшит за прошедшую неделю.\n\n"
         "• Результаты за прошлую неделю фиксируются в конце рабочего дня и будут использоваться в качестве анализа деятельности холдинга и его подразделений.\n\n"
         "• Спасибо! 🙌"
     )
@@ -1178,17 +1178,18 @@ def run_telegram():
 
     jq = updater.job_queue
     tz = pytz.timezone("Asia/Almaty")
+
     jq.run_daily(
         weekly_friday_broadcast,
-        time=dtime(hour=11, minute=30, tzinfo=tz),  # время по Asia/Almat
-        days=(2,),  # 0=Пн ... 4=Пт
+        time=dtime(hour=16, minute=0, tzinfo=tz),  # время по Asia/Almat
+        days=(4,),  # 0=Пн ... 4=Пт
         name="weekly_friday_broadcast",
     )
 
     jq.run_daily(
         weekly_monday_broadcast,
-        time=dtime(hour=11, minute=30, tzinfo=tz),  # время по Asia/Almat
-        days=(2,),  # 0=Пн ... 4=Пт
+        time=dtime(hour=11, minute=0, tzinfo=tz),  # время по Asia/Almat
+        days=(0,),  # 0=Пн ... 4=Пт
         name="weekly_monday_broadcast",
     )
 
