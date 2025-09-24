@@ -92,9 +92,31 @@ def weekly_friday_broadcast(context: CallbackContext):
     """
     Каждую пятницу шлём только тем, у кого authorized=Y и задан telegram_chat_id в user_data.
     """
-    text = "Напоминание: не забудьте заполнить тайм-шит 😊"
+    text = (
+        "<b>⚡️Важно! </b>\n"
+        "<b>Не забудьте внести трудозатраты в таймшит (по проектам и задачам) до 18:00.</b>\n\n"
+        "• Спасибо! 🙌"
+    )
     chat_ids = get_authorized_chat_ids()  # читаем актуально из таблицы на каждый запуск задания
     logger.info(f"Пятничная рассылка: {len(chat_ids)} получателей")
+    for cid in chat_ids:
+        try:
+            context.bot.send_message(chat_id=cid, text=text)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить сообщение в чат {cid}: {e}")
+
+def weekly_monday_broadcast(context: CallbackContext):
+    """
+    Каждую понедельник шлём только тем, у кого authorized=Y и задан telegram_chat_id в user_data.
+    """
+    text = (
+        "<b>⚡️Важно! </b>\n"
+        "<b>⚠️Не забудьте проверить и заполнить таймшит за прошедшую неделю.</b>\n\n"
+        "• Результаты за прошлую неделю фиксируются в конце рабочего дня и будут использоваться в качестве анализа деятельности холдинга и его подразделений."
+        "• Спасибо! 🙌"
+    )
+    chat_ids = get_authorized_chat_ids()  # читаем актуально из таблицы на каждый запуск задания
+    logger.info(f"Понедельник рассылка: {len(chat_ids)} получателей")
     for cid in chat_ids:
         try:
             context.bot.send_message(chat_id=cid, text=text)
@@ -1158,9 +1180,16 @@ def run_telegram():
     tz = pytz.timezone("Asia/Almaty")
     jq.run_daily(
         weekly_friday_broadcast,
-        time=dtime(hour=10, minute=0, tzinfo=tz),  # время по Asia/Almaty
-        days=(4,),  # 0=Пн ... 4=Пт
+        time=dtime(hour=11, minute=26, tzinfo=tz),  # время по Asia/Almat
+        days=(2,),  # 0=Пн ... 4=Пт
         name="weekly_friday_broadcast",
+    )
+
+    jq.run_daily(
+        weekly_friday_broadcast,
+        time=dtime(hour=11, minute=26, tzinfo=tz),  # время по Asia/Almat
+        days=(2,),  # 0=Пн ... 4=Пт
+        name="weekly_monday_broadcast",
     )
 
 
