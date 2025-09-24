@@ -93,8 +93,8 @@ def weekly_friday_broadcast(context: CallbackContext):
     Каждую пятницу шлём только тем, у кого authorized=Y и задан telegram_chat_id в user_data.
     """
     text = (
-        "<b>⚡️Важно! </b>\n"
-        "<b>Не забудьте внести трудозатраты в таймшит (по проектам и задачам) до 18:00.</b>\n\n"
+        "⚡️Важно!\n"
+        "Не забудьте внести трудозатраты в таймшит (по проектам и задачам) до 18:00.\n\n"
         "• Спасибо! 🙌"
     )
     chat_ids = get_authorized_chat_ids()  # читаем актуально из таблицы на каждый запуск задания
@@ -110,9 +110,9 @@ def weekly_monday_broadcast(context: CallbackContext):
     Каждую понедельник шлём только тем, у кого authorized=Y и задан telegram_chat_id в user_data.
     """
     text = (
-        "<b>⚡️Важно! </b>\n"
-        "<b>⚠️Не забудьте проверить и заполнить таймшит за прошедшую неделю.</b>\n\n"
-        "• Результаты за прошлую неделю фиксируются в конце рабочего дня и будут использоваться в качестве анализа деятельности холдинга и его подразделений."
+        "⚡️Важно!\n"
+        "⚠️Не забудьте проверить и заполнить таймшит за прошедшую неделю.\n"
+        "• Результаты за прошлую неделю фиксируются в конце рабочего дня и будут использоваться в качестве анализа деятельности холдинга и его подразделений.\n\n"
         "• Спасибо! 🙌"
     )
     chat_ids = get_authorized_chat_ids()  # читаем актуально из таблицы на каждый запуск задания
@@ -1180,14 +1180,14 @@ def run_telegram():
     tz = pytz.timezone("Asia/Almaty")
     jq.run_daily(
         weekly_friday_broadcast,
-        time=dtime(hour=11, minute=26, tzinfo=tz),  # время по Asia/Almat
+        time=dtime(hour=11, minute=30, tzinfo=tz),  # время по Asia/Almat
         days=(2,),  # 0=Пн ... 4=Пт
         name="weekly_friday_broadcast",
     )
 
     jq.run_daily(
-        weekly_friday_broadcast,
-        time=dtime(hour=11, minute=26, tzinfo=tz),  # время по Asia/Almat
+        weekly_monday_broadcast,
+        time=dtime(hour=11, minute=30, tzinfo=tz),  # время по Asia/Almat
         days=(2,),  # 0=Пн ... 4=Пт
         name="weekly_monday_broadcast",
     )
