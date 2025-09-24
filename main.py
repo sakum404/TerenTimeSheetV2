@@ -1158,8 +1158,8 @@ def run_telegram():
     tz = pytz.timezone("Asia/Almaty")
     jq.run_daily(
         weekly_friday_broadcast,
-        time=dtime(hour=10, minute=0, tzinfo=tz),  # время по Asia/Almaty
-        days=(4,),  # 0=Пн ... 4=Пт
+        time=dtime(hour=10, minute=40, tzinfo=tz),  # время по Asia/Almaty
+        days=(2,),  # 0=Пн ... 4=Пт
         name="weekly_friday_broadcast",
     )
 
