@@ -54,6 +54,7 @@ SPREADSHEET_NAME = "TerenTimeSheetV2"
 PROJECTS_SHEET = "projects_sheet"
 LOG_SHEET = "WebAppData"
 USER_SHEET = "user_data"
+KZT_TZ = pytz.timezone("Asia/Almaty")
 
 # Кэши на 5 минут
 cache_projects = TTLCache(maxsize=100, ttl=300)
@@ -123,6 +124,14 @@ def weekly_monday_broadcast(context: CallbackContext):
         except Exception as e:
             logger.warning(f"Не удалось отправить сообщение в чат {cid}: {e}")
 
+def ensure_log_header(header_name: str):
+    """Гарантирует, что в первой строке WebAppData есть столбец header_name (если нет — добавит в конец)."""
+    try:
+        header = log_sheet.row_values(1)
+        if header_name not in header:
+            log_sheet.update_cell(1, len(header) + 1, header_name)
+    except Exception as e:
+        logger.warning(f"Не удалось проверить/добавить заголовок '{header_name}': {e}")
 
 def _norm_uname(u: str | None) -> str:
     return (u or "").strip().lstrip("@").lower()
@@ -1135,7 +1144,14 @@ def receive_webapp(update: Update, context: CallbackContext):
         try:
             data = json.loads(update.message.web_app_data.data)
             user = update.message.from_user.username or update.message.from_user.full_name
-            log_sheet.append_row([
+
+            # 1) Время в таймзоне Алматы
+            ensure_log_header("Время записи")
+            ts = datetime.now(KZT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+            # 2) Синхронизируемся с заголовками, чтобы положить "Время записи" в правильную колонку
+            header = log_sheet.row_values(1)
+            base_row = [
                 user,
                 data.get("projects", ""),
                 data.get("subproject", ""),
@@ -1147,15 +1163,32 @@ def receive_webapp(update: Update, context: CallbackContext):
                 data.get("time_frame", ""),
                 data.get("difficulty_level", ""),
                 data.get("time", ""),
-                # data.get("overtime", ""),
+                # data.get("overtime", ""),  # если вернёте — добавьте в header и сюда
                 data.get("comment", "")
-            ])
+            ]
+
+            # если в шапке есть "Время записи", добьём список до её индекса и поставим ts
+            try:
+                idx_time = header.index("Время записи")  # 0-based
+                # добиваем пустотами до нужной длины
+                while len(base_row) < idx_time:
+                    base_row.append("")
+                if len(base_row) == idx_time:
+                    base_row.append(ts)
+                else:
+                    base_row[idx_time] = ts
+            except ValueError:
+                # на всякий случай — если шапка только что не успела обновиться
+                base_row.append(ts)
+
+            log_sheet.append_row(base_row)
             update.message.reply_text("✅ Сохранено.")
         except Exception as e:
             logger.exception("Ошибка при записи данных")
             update.message.reply_text("⚠️ Ошибка при обработке данных.")
     else:
         update.message.reply_text("⚠️ Нет данных из WebApp.")
+
 
 def run_telegram():
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
