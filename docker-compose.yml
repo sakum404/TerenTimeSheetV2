@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    container_name: terentimesheet-bot
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
+      BOT_PASSWORD: "${BOT_PASSWORD}"
+      FORM_URL: "${FORM_URL}"
+      REPORT_URL: "${REPORT_URL}"
+      GOOGLE_CREDS_JSON: '${GOOGLE_CREDS_JSON}'
+      BITRIX_WEBHOOK: "${BITRIX_WEBHOOK}"
+      BITRIX_PROJECT_ID: "${BITRIX_PROJECT_ID}"
+    volumes:
+      - ./static:/app/static
