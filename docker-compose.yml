@@ -4,7 +4,7 @@ services:
     container_name: terentimesheet-bot
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "4000:4000"
     environment:
       TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
       BOT_PASSWORD: "${BOT_PASSWORD}"
