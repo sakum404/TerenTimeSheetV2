@@ -1,7 +1,7 @@
 services:
   app:
     build: .
-    container_name: terentimesheet-bot
+    container_name: sanatimesheet-bot
     restart: unless-stopped
     ports:
       - "4000:4000"
